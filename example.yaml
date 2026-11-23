@@ -1,0 +1,24 @@
+# 示例：不包含任何真实节点，所有流量均直连。
+# 将你的完整 mihomo YAML 配置粘贴/导入到启动器中即可。
+mode: rule
+log-level: info
+
+# 下面仅演示结构，不能用于连接代理服务。
+proxies: []
+# proxies:
+#   - name: "你的节点"
+#     type: vless
+#     server: example.com
+#     port: 443
+#     uuid: "请填写"
+#     network: tcp
+#     udp: true
+#     tls: true
+#     servername: example.com
+#     reality-opts:
+#       public-key: "请填写"
+#       short-id: ""
+#     client-fingerprint: chrome
+
+rules:
+  - MATCH,DIRECT

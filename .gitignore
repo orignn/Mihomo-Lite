@@ -1,0 +1,42 @@
+# Local runtime, secrets, generated artifacts and historical archives
+# Includes build/pipeline timing reports and verified public Geo download batches
+/.cache/
+/archive/
+/release/
+/runtime/
+/data/
+/logs/
+/launcher.json
+/CURRENT.json
+*.exe
+
+# Local optional component bootstrap; do not publish to GitHub
+/setup.ps1
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Compiled resource .syso files in cmd/ are intentional source inputs.
+
+# Local working notes and private acceptance histories are not public docs
+/AGENTS.md
+/WORKSPACE.md
+/UPDATE.md
+/tools/inspect-profile-groups.go
+/cmd/mihomolite/CONSOLE_TESTS.md
+/docs/*
+!/docs/DEVELOPMENT.md
+!/docs/RELEASE.md
+!/docs/CHANGELOG.md
+
+# Never commit accidental credentials or local databases
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.db
+*.sqlite
+*.sqlite3
