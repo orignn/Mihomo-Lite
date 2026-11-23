@@ -24,9 +24,12 @@ function Get-PipelinePath {
 }
 function Assert-PipelineIdle {
     $rootBinary = Get-PipelinePath 'MihomoLite.exe'
+    # Only a workspace that owns a daily launcher can overwrite one. An isolated
+    # release checkout must not be blocked by unrelated running processes.
+    $ownsDailyLauncher = Test-Path -LiteralPath $rootBinary -PathType Leaf
     foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
-        if ($process.Name -ieq 'mihomo.exe') { throw 'Publish refused: mihomo is running; exit the application before publishing.' }
-        if ($process.Name -ieq 'MihomoLite.exe' -and (-not $process.ExecutablePath -or [IO.Path]::GetFullPath([string]$process.ExecutablePath) -ieq $rootBinary)) { throw 'Publish refused: the current launcher is running or its path cannot be resolved.' }
+        if ($process.Name -ieq 'MihomoLite.exe' -and $ownsDailyLauncher -and (-not $process.ExecutablePath -or [IO.Path]::GetFullPath([string]$process.ExecutablePath) -ieq $rootBinary)) { throw 'Publish refused: the current launcher is running or its path cannot be resolved.' }
+        if ($process.Name -ieq 'mihomo.exe' -and $ownsDailyLauncher) { throw 'Publish refused: mihomo is running; exit the application before publishing.' }
     }
 }
 function Get-PipelineProtectedState {
