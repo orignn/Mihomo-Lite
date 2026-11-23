@@ -63,7 +63,11 @@ function Invoke-WebRequest {
     param([string]$Uri,[switch]$UseBasicParsing,[int]$MaximumRedirection,[int]$TimeoutSec,[hashtable]$Headers)
     if ($global:NoticeTest_offline) { throw 'TEST: network invoked during offline validation' }
     $global:NoticeTest_mockCalls.Add($Uri)
-    if ($Uri -in @('https://www.maxmind.com/en/geolite2/eula','https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt')) { return [pscustomobject]@{StatusCode=200;Content='SYNTHETIC TEST POLICY ONLY: MaxMind attribution and CC BY-SA 4.0 license text fixture.'} }
+    if ($Uri -ceq 'https://www.maxmind.com/en/geolite2/eula') { throw 'TEST: retired MaxMind URL returns HTTP 302 to /en/geolite/eula' }
+    if ($Uri -in @('https://www.maxmind.com/en/geolite/eula','https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt')) {
+        Assert ($MaximumRedirection -eq 0) 'Policy requests must not follow arbitrary redirects'
+        return [pscustomobject]@{StatusCode=200;Content='SYNTHETIC TEST POLICY ONLY: MaxMind attribution and CC BY-SA 4.0 license text fixture.'}
+    }
     if ($Uri -cnotmatch '^https://api\.github\.com/repos/') { throw 'Unexpected mock URL' }
     if ($Uri -match '/releases/([1-3])$') {
         $tags = @{1='v1.2.3';2='v2.3.4';3='20261123'}
@@ -117,6 +121,13 @@ Case 'Refresh preserves every local license/notice and source archives' {
     Assert (@($global:NoticeTest_prepared.records | Where-Object {$_.path -match '\.tar\.gz$'}).Count -eq 0) 'Source archive leaked into install ZIP records'
     $texts=@($global:NoticeTest_prepared.records | Where-Object {$_.path -like 'LICENSES/go-*/*'} | ForEach-Object {ReadText $global:NoticeTest_good $_.path}) -join ' '
     Assert ($texts -match 'retained NOTICE' -and $texts -match 'second original license' -and $texts -notmatch 'MUST NOT BE COLLECTED') 'License originals corrupted or private nonlicense collected'
+}
+Case 'MaxMind policy uses current direct official URL and records its source' {
+    Assert ($global:NoticeTest_mockCalls.Contains('https://www.maxmind.com/en/geolite/eula')) 'Current MaxMind EULA was not requested'
+    Assert (-not $global:NoticeTest_mockCalls.Contains('https://www.maxmind.com/en/geolite2/eula')) 'Retired redirecting MaxMind URL was requested'
+    $sources=(ReadText $global:NoticeTest_good 'LICENSES/sources.json') | ConvertFrom-Json
+    $policy=@($sources.upstream | Where-Object { $_.path -eq 'LICENSES/geolite/maxmind-eula.txt' })
+    Assert ($policy.Count -eq 1 -and $policy[0].url -ceq 'https://www.maxmind.com/en/geolite/eula') 'Policy provenance must identify the actual official endpoint'
 }
 Case 'Machine index has exact files and no self-hash cycle' {
     $index=(ReadText $global:NoticeTest_good 'LICENSES/manifest.json') | ConvertFrom-Json

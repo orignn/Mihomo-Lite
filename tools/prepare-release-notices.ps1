@@ -227,9 +227,13 @@ function Save-NoticeArchive([string]$Repository, [string]$Commit, [string]$Compo
 }
 
 function Get-NoticePolicy([string]$Url, [string]$Path) {
-    if (-not $Refresh -or $Url -cnotin @('https://www.maxmind.com/en/geolite2/eula','https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt')) { throw 'Only fixed official license-policy URLs are allowed in Refresh.' }
+    if (-not $Refresh -or $Url -cnotin @('https://www.maxmind.com/en/geolite/eula','https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt')) { throw 'Only fixed official license-policy URLs are allowed in Refresh.' }
     try { $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 60 -Verbose:$false -Debug:$false }
-    catch { throw 'Unable to obtain required official GeoLite license policy.' }
+    catch {
+        $response = Get-NoticeProperty $_.Exception 'Response'
+        $status = Get-NoticeProperty $response 'StatusCode' 0
+        throw ('Unable to obtain required official GeoLite license policy: ' + $Url + ' (HTTP ' + [int]$status + '; 0 means no HTTP response).')
+    }
     if ($r.StatusCode -ne 200 -or $r.Content.Length -eq 0 -or $r.Content.Length -gt 8388608) { throw 'Invalid official license-policy response.' }
     Write-NoticeText $Path ([string]$r.Content)
     return [pscustomobject]@{ url = $Url; path = $Path; retrievedAt = [datetime]::UtcNow.ToString('o'); format = 'original public policy response' }
@@ -358,7 +362,7 @@ foreach ($repo in $geoSources.Keys) {
     if (@($docs | Where-Object { $_.originalPath -in @('LICENSE','LICENSE.md','COPYING') -and -not $_.missing }).Count -eq 0) { $limitations.Add('No explicit license located for named factual domain-list source ' + $repo + '; public availability is not a blanket grant for copyrightable material.') }
     $evidence += [pscustomobject]@{ repository = $repo; commit = $commit; role = 'current public license/attribution research snapshot, not a claimed same-release generation input'; documents = $docs }
 }
-$evidence += Get-NoticePolicy 'https://www.maxmind.com/en/geolite2/eula' 'LICENSES/geolite/maxmind-eula.txt'
+$evidence += Get-NoticePolicy 'https://www.maxmind.com/en/geolite/eula' 'LICENSES/geolite/maxmind-eula.txt'
 $evidence += Get-NoticePolicy 'https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt' 'LICENSES/geolite/CC-BY-SA-4.0.txt'
 $limitations.Add('Official upstream Geo release identifies published assets and generator source, not all historical immutable external input revisions. Current source-license snapshots are not proof of full bit-for-bit reproducibility.')
 $limitations.Add('GPL corresponding-source directions identify the fixed official release source archive and preserved build/Go lock files. Required non-System-Library dependencies and generation inputs remain governed by their own notices; distributor must maintain equivalent source access, not merely link latest branches.')
