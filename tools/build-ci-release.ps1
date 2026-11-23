@@ -88,8 +88,14 @@ try {
     $env:GOOS='windows'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'
     $env:GOPROXY='https://proxy.golang.org,direct'; $env:GOSUMDB='sum.golang.org'
     Write-Host 'Preparing pinned Go modules explicitly; later build stages are offline.'
-    & $go.Source mod download
+    $lockedModules = @([IO.File]::ReadAllLines((Assert-CIPath $root 'go.sum')) | ForEach-Object {
+        if ($_ -cmatch '^([A-Za-z0-9][A-Za-z0-9._~!/+-]*) (v[0-9][A-Za-z0-9.+-]*) h1:[A-Za-z0-9+/]{43}=$') { $Matches[1] + '@' + $Matches[2] }
+    })
+    if ($lockedModules.Count -eq 0) { throw 'No pinned public module content locks found.' }
+    & $go.Source mod download @lockedModules
     if ($LASTEXITCODE -ne 0) { throw 'Pinned Go module preparation failed.' }
+    & $go.Source mod verify
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned Go module cache verification failed.' }
     $geo = & (Assert-CIPath $root 'tools/prepare-geodata.ps1') -WorkspaceRoot $root -Refresh
     if (-not $geo -or -not $geo.root) { throw 'Official double-DAT preparation did not produce a verified batch.' }
     $components = & (Assert-CIPath $root 'tools/prepare-release-components.ps1') -WorkspaceRoot $root -GeoDataRoot $geo.root -Refresh -PassThru
@@ -126,17 +132,27 @@ try {
     if (-not @($noticeIdentity.sourceArchives).Count) { throw 'Corresponding upstream source archives must accompany the release.' }
     $goSummary = $current.tests.summary.go
     $nodePass = ($current.tests.summary.node | Measure-Object -Property passed -Sum).Sum
-    $lines = @('# Mihomo Lite ' + $Tag, '', 'Windows x64 complete portable package. Verify SHA-256 before extraction.', '', 'Source commit: ' + $commit, 'Launcher SHA-256: ' + $current.binary.sha256, '', 'Default Go tests: ' + $goSummary.topLevelPassed + ' top-level PASS, ' + $goSummary.subtestsPassed + ' subtests PASS, ' + $goSummary.topLevelSkipped + ' top-level SKIP.', 'Frontend tests: ' + $nodePass + ' PASS.', '', 'Skipped/native Windows, live system proxy, reboot and private-subscription scenarios are not claimed as accepted.', 'Third-party license notices are included in the ZIP; fixed upstream source archives are attached separately.', 'No user subscriptions, credentials, runtime snapshots, logs or caches are included.', '', 'Installation: extract the complete ZIP and run the launcher. Source-code archives are not installation packages.')
+    $lines = @(('# Mihomo Lite ' + $Tag), '', 'Windows x64 complete portable package. Verify SHA-256 before extraction.', '', ('Source commit: ' + $commit), ('Launcher SHA-256: ' + $current.binary.sha256), '', ('Default Go tests: ' + $goSummary.topLevelPassed + ' top-level PASS, ' + $goSummary.subtestsPassed + ' subtests PASS, ' + $goSummary.topLevelSkipped + ' top-level SKIP.'), ('Frontend tests: ' + $nodePass + ' PASS.'), '', 'Skipped/native Windows, live system proxy, reboot and private-subscription scenarios are not claimed as accepted.', 'Third-party license notices are included in the ZIP; fixed upstream source archives are attached separately.', 'No user subscriptions, credentials, runtime snapshots, logs or caches are included.', '', 'Installation: extract the complete ZIP and run the launcher. Source-code archives are not installation packages.')
+    $lines += @('', '## Component versions and upstream asset SHA-256', '', '| Component | Version | Upstream asset SHA-256 |', '| --- | --- | --- |')
+    foreach ($component in @($components.components)) {
+        if ($null -eq $component) { continue }
+        $lines += '| ' + $component.name + ' | ' + $component.version + ' | ' + $component.asset.digest + ' |'
+    }
+    $lines += @('', 'Geo DAT payloads:')
+    foreach ($file in @($manifest.files | Where-Object { $_.path -cin @('MihomoLite/data/geosite.dat','MihomoLite/data/geoip.dat') })) { $lines += '- ' + $file.path + ': SHA-256 ' + $file.sha256 }
+    $lines += @('', '## Default regression skips', '')
+    foreach ($skipped in @($goSummary.skipped)) { if ($skipped) { $lines += '- ' + $skipped } }
+    $lines += @('', 'Complete release-asset digests are in RELEASE_SHA256SUMS.txt; ZIP payload digests are in SHA256SUMS.txt.')
     $notesPath = Join-Path $artifactDir 'RELEASE_NOTES.md'
     Write-CINewText $notesPath (($lines -join [Environment]::NewLine) + [Environment]::NewLine)
     $assets.Add([pscustomobject]@{name='RELEASE_NOTES.md';sha256=(Get-FileHash -LiteralPath $notesPath -Algorithm SHA256).Hash.ToLowerInvariant();size=(Get-Item -LiteralPath $notesPath).Length})
     $sumsPath = Join-Path $artifactDir 'RELEASE_SHA256SUMS.txt'
     Write-CINewText $sumsPath ((@($assets | Sort-Object name | ForEach-Object { $_.sha256 + '  ' + $_.name }) -join [Environment]::NewLine) + [Environment]::NewLine)
     $assets.Add([pscustomobject]@{name='RELEASE_SHA256SUMS.txt';sha256=(Get-FileHash -LiteralPath $sumsPath -Algorithm SHA256).Hash.ToLowerInvariant();size=(Get-Item -LiteralPath $sumsPath).Length})
-    $report = [ordered]@{schemaVersion=1;status='verified-ready';repository='orignn/Mihomo-Lite';tag=$Tag;version=$version;sourceCommit=$commit;launcherSHA256=$current.binary.sha256;package=$manifest.artifact.path;assets=@($assets);tests=$current.tests.summary;sourceVerified=$true;releaseNoticePolicy=1;geoDataPolicy=1;generatedAt=[datetime]::UtcNow.ToString('o')}
+    $report = [ordered]@{schemaVersion=1;status='verified-ready';repository='orignn/Mihomo-Lite';tag=$Tag;version=$version;sourceCommit=$commit;launcherSHA256=$current.binary.sha256;package=$manifest.artifact.path;assets=$assets.ToArray();tests=$current.tests.summary;sourceVerified=$true;releaseNoticePolicy=1;geoDataPolicy=1;generatedAt=[datetime]::UtcNow.ToString('o')}
     Write-CINewText (Join-Path $artifactDir 'release-report.json') (($report | ConvertTo-Json -Depth 12) + [Environment]::NewLine)
     if ($env:GITHUB_OUTPUT) {
-        foreach ($value in @('tag=' + $Tag, 'source_commit=' + $commit, 'artifact_dir=' + $artifactDir.Replace('\','/'))) {
+        foreach ($value in @(('tag=' + $Tag), ('source_commit=' + $commit), ('artifact_dir=' + $artifactDir.Replace('\','/')))) {
             if ($value.Contains([char]10) -or $value.Contains([char]13)) { throw 'Multiline Actions outputs are forbidden.' }
             [IO.File]::AppendAllText($env:GITHUB_OUTPUT, $value + [Environment]::NewLine, [Text.Encoding]::UTF8)
         }

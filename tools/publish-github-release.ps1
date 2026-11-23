@@ -39,6 +39,8 @@ function Assert-GRZIP([string]$Path, $Manifest) {
         if ($record.path -isnot [string] -or $record.path -cnotmatch '\AMihomoLite/[A-Za-z0-9_.@ /+-]+\z' -or $record.path -match '(^|/)\.\.?(/|$)|[. ]$' -or $record.sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or -not(Test-GRSize $record.size) -or -not $seen.Add($record.path)) { throw 'Invalid or duplicate package file identity.' }
         $expected[$record.path]=$record
     }
+    $launcher=$expected['MihomoLite/MihomoLite.exe']
+    if($null -eq $launcher -or $Manifest.binary.path -cne 'MihomoLite/MihomoLite.exe' -or $Manifest.binary.sha256 -cne $launcher.sha256 -or $Manifest.binary.size -ne $launcher.size){throw 'Package launcher identity disagrees with ZIP payload.'}
     foreach($record in @($Manifest.noticeFiles)) {
         $key='MihomoLite/'+$record.path
         if($record.path -cne 'THIRD_PARTY_NOTICES.md' -and $record.path -cnotmatch '\ALICENSES/[A-Za-z0-9._/-]+\.(?:txt|md|json)\z'){throw 'Invalid license payload path.'}

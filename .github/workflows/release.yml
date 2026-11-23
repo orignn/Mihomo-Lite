@@ -60,7 +60,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($test in @('tests/release-components.test.ps1', 'tests/release-notices.test.ps1', 'tests/ci-release.test.ps1', 'tests/github-release.test.ps1')) {
-            & (Join-Path $PWD $test)
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PWD $test)
             if ($LASTEXITCODE -ne 0) { throw "Release helper tests failed: $test" }
           }
       - name: Prepare verified public components, test, build and package
@@ -74,7 +74,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Complete release build failed.' }
       - name: Re-verify packaging policy against the adopted build
         run: |
-          & (Join-Path $PWD 'tests/ci-release-policy.test.ps1')
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PWD 'tests/ci-release-policy.test.ps1')
           if ($LASTEXITCODE -ne 0) { throw 'Packaging policy regression failed against the controlled build.' }
       - name: Preserve only verified release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

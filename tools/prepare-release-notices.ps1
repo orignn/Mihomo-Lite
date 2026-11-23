@@ -144,7 +144,13 @@ function Get-NoticeModuleEvidence($Modules) {
         $escaped = Convert-NoticeModuleEscape $m.module
         $base = $GoModCache + '/' + $escaped + '@' + $m.version
         $null = Get-NoticePath $base -Directory
-        if ((Read-NoticeText ($base + '/go.mod')) -match '(?m)^\s*replace\b') { throw 'Module replacement declarations are not accepted.' }
+        $moduleFile = $base + '/go.mod'
+        # Pre-module dependencies legitimately omit go.mod from their source ZIP.
+        # Go downloads a canonical (possibly synthesized) .mod in its public cache.
+        if (-not [IO.File]::Exists((Get-NoticePath $moduleFile -Missing))) {
+            $moduleFile = $GoModCache + '/cache/download/' + $escaped + '/@v/' + $m.version + '.mod'
+        }
+        if ((Read-NoticeText $moduleFile) -match '(?m)^\s*replace\b') { throw 'Module replacement declarations are not accepted.' }
         $ziphash = $GoModCache + '/cache/download/' + $escaped + '/@v/' + $m.version + '.ziphash'
         if ((Read-NoticeText $ziphash).Trim() -cne $m.goSum) { throw 'Local module cache ziphash differs from go.sum.' }
         $licenseFiles = @(Get-NoticeTree $base | Where-Object { Test-NoticeLicenseName ([IO.Path]::GetFileName($_)) })
@@ -156,7 +162,7 @@ function Get-NoticeModuleEvidence($Modules) {
             $target = 'LICENSES/go-' + $id + '/' + (Get-NoticeHash ([Text.Encoding]::UTF8.GetBytes($relative))).Substring(0, 16) + '.txt'
             $files += [pscustomobject]@{ input = (Get-NoticeRecord $file); path = $target; originalPath = $relative }
         }
-        [pscustomobject]@{ module = $m.module; version = $m.version; goSum = $m.goSum; cacheVerification = 'go.sum matches local ziphash; not an independent sumdb authenticity attestation'; files = $files; lockInputs = @((Get-NoticeRecord ($base + '/go.mod')), (Get-NoticeRecord $ziphash)) }
+        [pscustomobject]@{ module = $m.module; version = $m.version; goSum = $m.goSum; cacheVerification = 'go.sum matches local ziphash; not an independent sumdb authenticity attestation'; files = $files; lockInputs = @((Get-NoticeRecord $moduleFile), (Get-NoticeRecord $ziphash)) }
     }
 }
 function Invoke-NoticeGitHub([string]$Url, [switch]$Missing) {
@@ -230,7 +236,7 @@ function Get-NoticePolicy([string]$Url, [string]$Path) {
 }
 function Assert-NoticeInputPath([string]$Path) {
     if ($Path -cin @('go.mod','go.sum','LICENSE') -or $Path -ceq $ComponentManifest) { return }
-    if ($Path.StartsWith($GoModCache + '/', [StringComparison]::Ordinal) -and ($Path -cmatch '/(?:go\.mod|LICENSE[A-Za-z0-9._-]*|LICENCE[A-Za-z0-9._-]*|NOTICE[A-Za-z0-9._-]*|COPYING[A-Za-z0-9._-]*|COPYRIGHT[A-Za-z0-9._-]*|v[A-Za-z0-9.+-]+\.ziphash)$')) { return }
+    if ($Path.StartsWith($GoModCache + '/', [StringComparison]::Ordinal) -and ($Path -cmatch '/(?:go\.mod|LICENSE[A-Za-z0-9._-]*|LICENCE[A-Za-z0-9._-]*|NOTICE[A-Za-z0-9._-]*|COPYING[A-Za-z0-9._-]*|COPYRIGHT[A-Za-z0-9._-]*|v[A-Za-z0-9.+-]+\.(?:mod|ziphash))$')) { return }
     if ($Path -cmatch '^\.cache/downloads/release-geodata-[A-Za-z0-9._-]+/(?:provenance\.json|geosite\.dat|geoip\.dat|geosite\.dat\.sha256sum|geoip\.dat\.sha256sum)$') { return }
     throw 'Notice input references a non-public or unapproved workspace path.'
 }
@@ -368,7 +374,7 @@ foreach ($a in $archives) { $offer += '- ' + $a.component + ': ' + $a.url + ' | 
 Write-NoticeText 'LICENSES/SOURCE_OFFER.md' ($offer -join [Environment]::NewLine)
 $sources = [ordered]@{ schemaVersion = 1; componentManifest = $componentInput; geoProvenance = (Get-NoticeRecord ($geoRoot + '/provenance.json')); goModules = $goEvidence; upstream = $evidence; sourceArchives = $archives; blockingIssues = @($issues.ToArray()); limitations = @($limitations.ToArray()); reviewScope = 'official publisher declarations and named public sources; not a comprehensive copyright or reproducibility audit' }
 Write-NoticeText 'LICENSES/sources.json' ($sources | ConvertTo-Json -Depth 30)
-$notice = @('# Third-party notices','','Evidence preparation status: ' + $status + '. This is not legal advice or a comprehensive copyright/reproducibility audit.','',
+$notice = @('# Third-party notices','',('Evidence preparation status: ' + $status + '. This is not legal advice or a comprehensive copyright/reproducibility audit.'),'',
     'Original license, notice, copyright, attribution and source-policy texts are retained unchanged under LICENSES. Author attributions are not invented. SHA-256 authenticity does not itself establish redistribution rights.','',
     'mhCore: MetaCubeX/mihomo (GNU GPL version 3; original text governs). Panel: Zephyruso/zashboard (MIT, including its original copyright). Geo: MetaCubeX/meta-rules-dat generator/license and separately attributed mixed input data; no claim that the repository GPL covers every database. Exact official release commits/IDs and sources are recorded in LICENSES/sources.json.','',
     'This product includes GeoLite Data created by MaxMind, available from https://www.maxmind.com. Copyrightable GeoLite database elements are governed by Creative Commons Attribution-ShareAlike 4.0 International (https://creativecommons.org/licenses/by-sa/4.0/). The upstream dataset is modified/combined/converted by the listed upstream projects; this distributor copies their published assets unchanged. Applicable MaxMind EULA and full CC license are included in LICENSES/geolite.','',

@@ -164,6 +164,23 @@ Case 'Reject mismatching cache module lock before network' {
     $root=NewFixture 'ziphash'; Put $root '.cache/toolchain/gomod/cache/download/github.com/dlclark/regexp2/@v/v1.12.0.ziphash' ('h1:'+('B'*43)+'=')
     ExpectReject {& $testScript -WorkspaceRoot $root -ComponentManifest $cm -Refresh} 'ziphash differs'
 }
+Case 'Legacy Go module uses canonical cached .mod without changing its source' {
+    $root=NewFixture 'legacy-mod'
+    $source=Join-Path $root '.cache/toolchain/gomod/github.com/dlclark/regexp2@v1.12.0/go.mod'
+    $archive=Join-Path $root '.cache/toolchain/gomod/github.com/dlclark/regexp2@v1.12.0/legacy-original.mod'
+    if (-not [IO.File]::Exists($source) -or [IO.File]::Exists($archive)) { throw 'Unexpected isolated legacy fixture paths' }
+    [IO.File]::Move($source,$archive)
+    $cached='.cache/toolchain/gomod/cache/download/github.com/dlclark/regexp2/@v/v1.12.0.mod'
+    Put $root $cached 'module github.com/dlclark/regexp2'
+    $r=& $testScript -WorkspaceRoot $root -ComponentManifest $cm -Refresh
+    Assert ($r.status -eq 'verified-ready') 'Legacy module should use canonical Go cache metadata'
+    Assert (@($r.inputs | Where-Object {$_.path -ceq $cached}).Count -eq 1) 'Cached module metadata must be an immutable input'
+    $global:NoticeTest_offline=$true
+    try { & $scriptPath -WorkspaceRoot $root -ComponentManifest $cm -NoticesManifest $r.manifest | Out-Null }
+    finally { $global:NoticeTest_offline=$false }
+    Put $root $cached 'module tampered'
+    ExpectReject { & $scriptPath -WorkspaceRoot $root -ComponentManifest $cm -NoticesManifest $r.manifest } 'hash/size mismatch|stale'
+}
 Case 'Reject mismatching Geo release provenance' {
     $root=NewFixture 'geobatch'; $p='.cache/downloads/release-geodata-fixture/provenance.json'; Put $root $p ((ReadText $root $p).Replace('"releaseId":  3','"releaseId":  4').Replace('"releaseId": 3','"releaseId": 4'))
     ExpectReject {& $testScript -WorkspaceRoot $root -ComponentManifest $cm -Refresh} 'Geo provenance disagrees'

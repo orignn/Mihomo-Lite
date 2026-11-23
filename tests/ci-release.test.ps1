@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-Offline preflight tests for tools/build-ci-release.ps1.
+Offline preflight and complete orchestration tests for tools/build-ci-release.ps1.
 Every fixture is synthetic and isolated under .cache/tests; no network, no Go/Node build,
 no real runtime data, no tag creation and no GitHub write.
 #>
@@ -113,13 +113,104 @@ try {
     Assert-Case ($noRefreshResult.text -notmatch '(?i)https?://|Invoke-WebRequest|Invoke-RestMethod') 'Offline preflight exposes no network call'
     $status = @(& $git -C $good status --porcelain)
     Assert-Case ($status.Count -eq 0) 'Preflight leaves the checkout untouched'
+    # Real Refresh orchestration with synthetic transport/compiler results; no upstream code runs.
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $tokens=$null; $errors=$null
+    $fixtureAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repoRoot 'tests/github-release.test.ps1'),[ref]$tokens,[ref]$errors)
+    if($errors.Count){throw 'Publisher fixture parser errors'}
+    foreach($name in @('Get-HashBytes','Get-HashFile','New-TempZip','New-Fixture')){
+        $definition=$fixtureAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+        if(-not $definition){throw 'Missing isolated artifact fixture helper'}
+        $text=$definition.Extent.Text
+        if($name -eq 'New-Fixture'){$text=$text.Replace('function New-Fixture(','function New-PublisherFixture(')}
+        . ([scriptblock]::Create($text))
+    }
+    foreach($hostName in @('powershell.exe','pwsh.exe')) {
+        $engine=Get-Command $hostName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if(-not $engine){continue}
+        $complete=New-Fixture ('complete-' + $hostName)
+        [IO.File]::WriteAllText((Join-Path $complete '.gitignore'),'.cache/' + [Environment]::NewLine)
+        [IO.File]::WriteAllText((Join-Path $complete 'go.sum'),'example.com/public v1.0.0 h1:' + ('A'*43) + '=' + [Environment]::NewLine)
+        $source=New-PublisherFixture ('artifact-seed-' + $hostName) $null
+        $seed=Join-Path $complete '.cache/integration/seed'
+        New-Item -ItemType Directory -Path $seed -Force | Out-Null
+        Copy-Item -Path (Join-Path $source.dir '*') -Destination $seed
+        $package=[IO.File]::ReadAllText((Join-Path $seed 'current.json')) | ConvertFrom-Json
+        foreach($archive in $package.sourceArchives){
+            $name='Source-'+$archive.component+'-'+$archive.commit.Substring(0,12)+'.tar.gz'
+            $relative='.cache/downloads/release-notices-integration/'+$archive.component+'-source-'+$archive.commit+'.tar.gz'
+            $target=Join-Path $complete $relative
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $seed $name) -Destination $target
+            $archive.path=$relative
+        }
+        [IO.File]::WriteAllText((Join-Path $seed 'current.json'),($package | ConvertTo-Json -Depth 20))
+        [IO.File]::WriteAllText((Join-Path $complete '.cache/downloads/release-notices-integration/notices.json'),([ordered]@{status='verified-ready';redistributionReady=$true;sourceArchives=@($package.sourceArchives)} | ConvertTo-Json -Depth 20))
+        [IO.File]::WriteAllText((Join-Path $complete 'tools/prepare-geodata.ps1'),'param([string]$WorkspaceRoot,[switch]$Refresh);[pscustomobject]@{root=".cache/downloads/release-geodata-integration"}')
+        [IO.File]::WriteAllText((Join-Path $complete 'tools/prepare-release-components.ps1'),'param([string]$WorkspaceRoot,[string]$GeoDataRoot,[switch]$Refresh,[switch]$PassThru);[pscustomobject]@{manifest=".cache/downloads/release-components-integration/components.json"}')
+        [IO.File]::WriteAllText((Join-Path $complete 'tools/prepare-release-notices.ps1'),'param([string]$WorkspaceRoot,[string]$ComponentManifest,[switch]$Refresh,[switch]$PassThru);[pscustomobject]@{manifest=".cache/downloads/release-notices-integration/notices.json"}')
+        $buildStub=@'
+param([switch]$Publish,[string]$GeoDataRoot,[string]$NoticeManifest,[string]$NodePath)
+$root=Split-Path -Parent $PSScriptRoot
+$seed=Join-Path $root '.cache/integration/seed'
+$manifest=Get-Content -LiteralPath (Join-Path $seed 'current.json') -Raw | ConvertFrom-Json
+$current=[ordered]@{version=$manifest.version;binary=$manifest.binary;tests=@{summary=@{go=@{topLevelPassed=2;subtestsPassed=3;topLevelSkipped=1;skipped=@('SyntheticNativeSkip')};node=@(@{passed=4})}}}
+[IO.File]::WriteAllText((Join-Path $root 'CURRENT.json'),($current | ConvertTo-Json -Depth 12))
+New-Item -ItemType Directory -Path (Join-Path $root 'release') -Force | Out-Null
+foreach($name in @($manifest.artifact.path,'current.json','SHA256SUMS.txt')){Copy-Item -LiteralPath (Join-Path $seed $name) -Destination (Join-Path $root ('release/'+$name))}
+[pscustomobject]@{status='passed';package=@{synthetic=$true}}
+'@
+        [IO.File]::WriteAllText((Join-Path $complete 'tools/build-release.ps1'),$buildStub)
+        $nl=[char]13+[string][char]10
+        [IO.File]::WriteAllText((Join-Path $complete '.cache/integration/fake-go.cmd'),('@echo off'+$nl+'echo %*>> "%~dp0go-calls.txt"'+$nl+'exit /b 0'+$nl))
+        $driver=@'
+param([string]$Root,[string]$OutputFile)
+$ErrorActionPreference='Stop'
+$env:GITHUB_OUTPUT=$OutputFile
+$global:CITestFakeGo=Join-Path $Root '.cache/integration/fake-go.cmd'
+function Get-Command {
+    param([string]$Name,[string]$CommandType)
+    if($Name -eq 'go'){return [pscustomobject]@{Source=$global:CITestFakeGo}}
+    Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
+}
+& (Join-Path $Root 'tools/build-ci-release.ps1') -WorkspaceRoot $Root -Tag v0.6.18 -Refresh -PassThru
+'@
+        $driverFile=Join-Path $complete '.cache/integration/driver.ps1'
+        [IO.File]::WriteAllText($driverFile,$driver)
+        & $git -C $complete add -A
+        & $git -C $complete -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m 'synthetic complete orchestration'
+        if($LASTEXITCODE -ne 0){throw 'Complete fixture commit failed'}
+        $outputFile=Join-Path $complete '.cache/integration/actions-output.txt'
+        $oldPreference=$ErrorActionPreference;$ErrorActionPreference='Continue'
+        try{$log=@(& $engine.Source -NoProfile -ExecutionPolicy Bypass -File $driverFile -Root $complete -OutputFile $outputFile 2>&1 | ForEach-Object{[string]$_});$code=$LASTEXITCODE}
+        finally{$ErrorActionPreference=$oldPreference}
+        [IO.File]::WriteAllText((Join-Path $complete '.cache/integration/driver.log'),($log -join [Environment]::NewLine))
+        Assert-Case ($code -eq 0) ($hostName+' complete synthetic orchestration succeeds')
+        if($code -ne 0){$log | Select-Object -Last 12 | Write-Host;continue}
+        $outputLines=@([IO.File]::ReadAllLines($outputFile))
+        Assert-Case ($outputLines.Count -eq 3 -and $outputLines[0] -ceq 'tag=v0.6.18' -and $outputLines[1] -cmatch '^source_commit=[0-9a-f]{40}$' -and $outputLines[2].StartsWith('artifact_dir=')) ($hostName+' Actions outputs are three independent canonical lines')
+        $artifactDir=$outputLines[2].Substring('artifact_dir='.Length)
+        $report=[IO.File]::ReadAllText((Join-Path $artifactDir 'release-report.json')) | ConvertFrom-Json
+        Assert-Case ($report.assets -is [Array] -and $report.assets.Count -eq 8 -and @($report.assets | Where-Object{$_ -is [Array]}).Count -eq 0) ($hostName+' Release asset JSON is flat and complete')
+        $notes=@([IO.File]::ReadAllLines((Join-Path $artifactDir 'RELEASE_NOTES.md')))
+        Assert-Case ($notes[0] -ceq '# Mihomo Lite v0.6.18' -and $notes.Count -gt 10 -and @($notes | Where-Object{$_ -match '^Source commit: [0-9a-f]{40}$'}).Count -eq 1) ($hostName+' Release notes preserve headings and line breaks')
+        Assert-Case (@($notes | Where-Object {$_ -ceq '- SyntheticNativeSkip'}).Count -eq 1) ($hostName+' Default regression skip names are recorded without inventing native acceptance')
+        $calls=@([IO.File]::ReadAllLines((Join-Path $complete '.cache/integration/go-calls.txt')))
+        Assert-Case ($calls.Count -eq 2 -and $calls[0] -ceq 'mod download example.com/public@v1.0.0' -and $calls[1] -ceq 'mod verify') ($hostName+' All pinned module downloads and cache verification are explicit')
+        $oldPreference=$ErrorActionPreference;$ErrorActionPreference='Continue'
+        try{$check=@(& $engine.Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'tools/publish-github-release.ps1') -ArtifactDirectory $artifactDir -ExpectedCommit $report.sourceCommit -ExpectedTag $report.tag 2>&1 | ForEach-Object{[string]$_});$publishCode=$LASTEXITCODE}
+        finally{$ErrorActionPreference=$oldPreference}
+        Assert-Case ($publishCode -eq 0 -and ($check -join ' ') -match 'verified offline') ($hostName+' Real publisher accepts wrapper-generated synthetic assets offline')
+        if($publishCode -ne 0){$check | Write-Host}
+    }
 } finally {
     $payload = [ordered]@{
         status = 'completed'
         passed = $passed
         failed = $failed
         cases = $results
-        scope = 'offline isolated preflight only; Refresh, downloads, build, packaging and GitHub are not exercised'
+        scope = 'offline preflight and complete real orchestration with synthetic download/compiler/package results; real asset copying/reports/Actions outputs/offline publisher; no network or GitHub writes'
         at = [datetime]::UtcNow.ToString('o')
     }
     [IO.File]::WriteAllText((Join-Path $run 'results.json'), ($payload | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
