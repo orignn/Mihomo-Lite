@@ -29,6 +29,11 @@ __pycache__/
 !/docs/DEVELOPMENT.md
 !/docs/RELEASE.md
 !/docs/CHANGELOG.md
+!/docs/THIRD-PARTY.md
+
+# Generated release licensing materials (prepared only in clean release workspaces)
+/THIRD_PARTY_NOTICES.md
+/LICENSES/
 
 # Never commit accidental credentials or local databases
 .env

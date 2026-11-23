@@ -1,0 +1,126 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag (blank = source AppVersion, e.g. v0.6.18)'
+        type: string
+        required: false
+        default: ''
+      publish_release:
+        description: 'Create a GitHub Release after verification (off = Actions artifact only)'
+        type: boolean
+        default: true
+      draft:
+        description: 'Leave the manual Release as a draft for review'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    if: github.repository == 'orignn/Mihomo-Lite'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.build.outputs.tag }}
+      source_commit: ${{ steps.build.outputs.source_commit }}
+    steps:
+      - name: Check out the selected immutable source revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install Go from go.mod
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Verify release helpers using isolated synthetic fixtures
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($test in @('tests/release-components.test.ps1', 'tests/release-notices.test.ps1', 'tests/ci-release.test.ps1', 'tests/github-release.test.ps1')) {
+            & (Join-Path $PWD $test)
+            if ($LASTEXITCODE -ne 0) { throw "Release helper tests failed: $test" }
+          }
+      - name: Prepare verified public components, test, build and package
+        id: build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SELECTED_COMMIT: ${{ github.sha }}
+          SELECTED_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || '' }}
+        run: |
+          & .\tools\build-ci-release.ps1 -WorkspaceRoot $PWD.Path -Tag $env:SELECTED_TAG -SourceCommit $env:SELECTED_COMMIT -NodePath (Get-Command node).Source -Refresh
+          if ($LASTEXITCODE -ne 0) { throw 'Complete release build failed.' }
+      - name: Re-verify packaging policy against the adopted build
+        run: |
+          & (Join-Path $PWD 'tests/ci-release-policy.test.ps1')
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging policy regression failed against the controlled build.' }
+      - name: Preserve only verified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-release
+          path: ${{ steps.build.outputs.artifact_dir }}/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Report validation-only build
+        if: github.ref_type != 'tag' && (github.event_name != 'workflow_dispatch' || !inputs.publish_release)
+        run: |
+          'Verified installation ZIP and fixed upstream sources are available as this run''s Actions artifact. No GitHub Release was created.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+  publish:
+    needs: build
+    if: github.repository == 'orignn/Mihomo-Lite' && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact revision that built the artifacts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build.outputs.source_commit }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Download this run's verified artifact only
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-x64-release
+          path: .cache/package/github-release-download
+      - name: Verify hashes again and create a draft-first Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_COMMIT: ${{ needs.build.outputs.source_commit }}
+          SELECTED_TAG: ${{ needs.build.outputs.tag }}
+          LEAVE_DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft && 'true' || 'false' }}
+        run: |
+          $arguments = @{
+            ArtifactDirectory = (Join-Path $PWD '.cache/package/github-release-download')
+            ExpectedCommit = $env:SELECTED_COMMIT
+            ExpectedTag = $env:SELECTED_TAG
+            Publish = $true
+            Draft = ($env:LEAVE_DRAFT -eq 'true')
+          }
+          & .\tools\publish-github-release.ps1 @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication did not complete; inspect any retained draft before retrying.' }

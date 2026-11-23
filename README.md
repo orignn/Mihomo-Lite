@@ -22,7 +22,7 @@ Mihomo Lite 将 [mihomo](https://github.com/MetaCubeX/mihomo) 内核、[Zashboar
 
 ## 下载与开始使用
 
-**目前仓库提供源码，本轮不上传完整安装包。** 完整安装包在发布后从 [Releases](https://github.com/orignn/Mihomo-Lite/releases) 下载；若尚无资产，请使用下文源码构建说明。不要把 GitHub 的「Source code」压缩包当作安装包。
+**仓库提供源码；完整安装包由 GitHub Actions 在推送版本标签或手动运行时构建，成功发布后可从 [Releases](https://github.com/orignn/Mihomo-Lite/releases) 下载。** 若 Releases 尚无安装包资产，请使用下文源码构建说明。不要把 GitHub 的「Source code」压缩包当作安装包。
 
 取得 Windows x64 完整包后：
 
@@ -149,7 +149,7 @@ launcher.json 本机设置与 API 密钥
 CURRENT.json  本地构建/发布身份
 ~~~
 
-源码提交与二进制发布分开：Git 仓库只提供审查后的源码、测试、源资源及公开说明；本轮只发布源码，不上传完整 ZIP。后续完整包可作为 Release 资产单独发布，不压缩上传整个工作区，不发布用户数据、缓存或历史测试环境。
+源码提交与二进制发布分开：Git 仓库只提供审查后的源码、测试、源资源及公开说明；完整 ZIP 由 [发布工作流](<.github/workflows/release.yml>) 在托管环境从固定官方资源构建，并作为 Release 资产上传。不压缩上传整个工作区，不发布用户数据、缓存或历史测试环境。
 
 正式发布流程参见 [发布指南](<docs/RELEASE.md>)。维护正式包应使用官方可核验的公开资源白名单，不能从用户运行区或私有测试环境取数据库。新包须同时包含经同批公开上游摘要核验的两份 DAT，并保留 MetaDB；普通构建和打包不自动联网。发布前需要保持正式入口、清单、包内载荷与 SHA-256 一致，并完成严格工作区检查与公开载荷审查。
 
@@ -159,6 +159,7 @@ CURRENT.json  本地构建/发布身份
 
 - [开发指南](<docs/DEVELOPMENT.md>)
 - [发布指南](<docs/RELEASE.md>)
+- [第三方许可说明](<docs/THIRD-PARTY.md>)
 - [精简更新记录](<docs/CHANGELOG.md>)
 - [GitHub Issues](https://github.com/orignn/Mihomo-Lite/issues)
 
@@ -166,4 +167,4 @@ CURRENT.json  本地构建/发布身份
 
 感谢 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 与 [Zephyruso/zashboard](https://github.com/Zephyruso/zashboard)。第三方组件、依赖和 Geo 数据受各自许可证及使用条款约束。
 
-本项目目前未指定主许可证，也未提供项目级 LICENSE 文件。源码公开不等于授予任意使用、修改或再分发授权；第三方组件、依赖和 Geo 数据仍按各自许可证及条款使用。
+本项目目前未指定主许可证，也未提供项目级 LICENSE 文件。源码公开不等于授予任意使用、修改或再分发授权；第三方组件、依赖和 Geo 数据仍按各自许可证及条款使用。完整包的第三方许可、GPL 对应源码和 MaxMind GeoLite 更新义务见 [第三方许可说明](<docs/THIRD-PARTY.md>)。

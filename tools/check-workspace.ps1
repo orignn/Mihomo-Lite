@@ -177,6 +177,63 @@ function Check-PayloadChecksums($Records) {
         }
     } catch { Add-Problem ("Cannot validate release/SHA256SUMS.txt: {0}" -f $_.Exception.Message) }
 }
+function Get-NoticeLicensePath($Value, [string]$Label) {
+    $name = Get-SafeSegments $Value $Label
+    if ($null -eq $name) { return $null }
+    if ($Value -cne $name -or $name -cnotmatch '^LICENSES/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\.(?:txt|md|json)$') {
+        Add-Problem "$Label must be a canonical LICENSES/ text or JSON path."; return $null
+    }
+    return $name
+}
+function Get-NoticeRecords($PayloadRecords) {
+    $records = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    if (-not (Is-Object $manifest) -or $manifest.noticeFiles -isnot [Array] -or $manifest.noticeFiles.Count -lt 2) {
+        Add-Problem 'release/current.json.noticeFiles must contain notices and complete license records.'; return ,$records
+    }
+    foreach ($record in $manifest.noticeFiles) {
+        if (-not (Is-Object $record)) { Add-Problem 'noticeFiles must contain objects.'; continue }
+        $name = if ($record.path -ceq 'THIRD_PARTY_NOTICES.md') { 'THIRD_PARTY_NOTICES.md' } else { Get-NoticeLicensePath $record.path 'noticeFiles.path' }
+        if ($null -eq $name) { continue }
+        if (-not $seen.Add($name)) { Add-Problem "Duplicate or case-colliding noticeFiles path: '$name'."; continue }
+        $validHash = Test-HashValue $record.sha256 'noticeFiles.sha256'
+        $validSize = (Is-Size $record.size) -and $record.size -gt 0 -and $record.size -le [long]::MaxValue -and
+            ($record.size -isnot [double] -or $record.size -lt 9223372036854775808.0)
+        if (-not $validSize) { Add-Problem 'noticeFiles.size must be a positive Int64 integer.' }
+        $payloadName = 'MihomoLite/' + $name
+        if (-not $PayloadRecords.ContainsKey($payloadName)) { Add-Problem "noticeFiles entry is missing from manifest.files: '$name'." }
+        elseif ($record.sha256 -cne $PayloadRecords[$payloadName].sha256 -or $record.size -ne $PayloadRecords[$payloadName].size) { Add-Problem "noticeFiles SHA-256/size does not match manifest.files: '$name'." }
+        if ($validHash -and $validSize) { $records.Add($payloadName, $record) }
+    }
+    if (-not $records.ContainsKey('MihomoLite/LICENSES/manifest.json')) { Add-Problem 'noticeFiles must declare LICENSES/manifest.json.' }
+    if (-not $records.ContainsKey('MihomoLite/THIRD_PARTY_NOTICES.md')) { Add-Problem 'noticeFiles must declare THIRD_PARTY_NOTICES.md.' }
+    if (@($records.Keys | Where-Object { $_ -cmatch '^MihomoLite/LICENSES/.+\.(txt|md)$' }).Count -eq 0) { Add-Problem 'noticeFiles must declare non-empty full license text (.txt or .md).' }
+    return ,$records
+}
+function Check-LicenseIndex($Archive, $NoticeRecords) {
+    $entries = @($Archive.Entries | Where-Object { $_.FullName -ceq 'MihomoLite/LICENSES/manifest.json' })
+    if ($entries.Count -ne 1 -or $entries[0].Length -le 0 -or $entries[0].Length -gt 4194304) { Add-Problem 'ZIP must contain one non-empty LICENSES/manifest.json (at most 4 MiB).'; return }
+    $reader = $null
+    try {
+        $reader = New-Object IO.StreamReader ($entries[0].Open())
+        $index = $reader.ReadToEnd() | ConvertFrom-Json
+        if (-not (Is-Object $index) -or ($index.schemaVersion -isnot [int] -and $index.schemaVersion -isnot [long]) -or $index.schemaVersion -ne 1 -or $index.records -isnot [Array] -or $index.records.Count -eq 0) { Add-Problem 'LICENSES/manifest.json must have schemaVersion=1 and complete records excluding itself.'; return }
+        $seenIndex = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($entry in $index.records) {
+            if (-not (Is-Object $entry)) { Add-Problem 'License index records must be objects.'; continue }
+            $relative = Get-NoticeLicensePath $entry.path 'License index record.path'
+            if ($null -eq $relative) { continue }
+            if ($relative -ceq 'LICENSES/manifest.json' -or -not $seenIndex.Add($relative)) { Add-Problem 'License index contains self-reference or duplicate path.'; continue }
+            $name = 'MihomoLite/' + $relative
+            if (-not $NoticeRecords.ContainsKey($name)) { Add-Problem "License index entry is missing from noticeFiles: '$relative'." }
+            elseif ($entry.sha256 -cne $NoticeRecords[$name].sha256 -or -not (Is-Size $entry.size) -or $entry.size -ne $NoticeRecords[$name].size) { Add-Problem "License index SHA-256/size does not match noticeFiles: '$relative'." }
+        }
+        foreach ($name in $NoticeRecords.Keys) {
+            if ($name.StartsWith('MihomoLite/LICENSES/', [StringComparison]::Ordinal) -and $name -cne 'MihomoLite/LICENSES/manifest.json' -and -not $seenIndex.Contains($name.Substring(11))) { Add-Problem "License index is missing a noticeFiles entry: '$name'." }
+        }
+    } catch { Add-Problem ("Cannot validate ZIP license index: {0}" -f $_.Exception.Message) }
+    finally { if ($null -ne $reader) { $reader.Dispose() } }
+}
 function Check-Zip([string]$Path, [string]$ExpectedHash, $ExpectedSize) {
     $archive = $null
     try {
@@ -187,22 +244,38 @@ function Check-Zip([string]$Path, [string]$ExpectedHash, $ExpectedSize) {
         $executables = New-Object 'System.Collections.Generic.List[object]'
         $payloadSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
         $launcherHash = $null
-        if ($VerifyPayload) { $payloadRecords = Get-PayloadRecords; Check-PayloadChecksums $payloadRecords }
+        $strongPayload = $VerifyPayload -or $noticePolicy
+        if ($strongPayload) { $payloadRecords = Get-PayloadRecords; Check-PayloadChecksums $payloadRecords }
         $requiredFiles = @('MihomoLite/MihomoLite.exe', 'MihomoLite/runtime/mihomo.exe', 'MihomoLite/data/geoip.metadb', 'MihomoLite/data/ui/index.html', 'MihomoLite/example.yaml', 'MihomoLite/README.md')
         $publicDocs = @('MihomoLite/docs/DEVELOPMENT.md', 'MihomoLite/docs/RELEASE.md', 'MihomoLite/docs/CHANGELOG.md')
+        $optionalPublicDocs = @('MihomoLite/docs/THIRD-PARTY.md')
         # Historical publications contain UPDATE.md; new public packages require the complete public docs set.
         $zipNames = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-        if ($zipNames -ccontains 'MihomoLite/UPDATE.md') { $requiredFiles += 'MihomoLite/UPDATE.md' }
+        if (-not $noticePolicy -and $zipNames -ccontains 'MihomoLite/UPDATE.md') { $requiredFiles += 'MihomoLite/UPDATE.md' }
         else { $requiredFiles += $publicDocs }
         # Preserve pre-policy historical ZIPs; every newly generated package
         # declares geoDataPolicy=1, even if an existing version is repackaged.
         $baseVersion = [regex]::Match([string]$version, '^\d+\.\d+\.\d+').Value
-        if ($VerifyPayload -or $RequireGeoData -or (Has-Property $current.release 'geoDataPolicy') -or (Has-Property $manifest 'geoDataPolicy') -or
+        if ($strongPayload -or $RequireGeoData -or (Has-Property $current.release 'geoDataPolicy') -or (Has-Property $manifest 'geoDataPolicy') -or
             ($baseVersion -and [version]$baseVersion -ge [version]'0.6.11')) {
             $requiredFiles += @('MihomoLite/data/geosite.dat', 'MihomoLite/data/geoip.dat')
         }
         # Local setup is optional only for historical ZIP compatibility; strong mode still hashes every entry.
-        $fixedFiles = $requiredFiles + $publicDocs + @('MihomoLite/setup.ps1', 'MihomoLite/UPDATE.md', 'MihomoLite/launcher.example.json', 'MihomoLite/LICENSE', 'MihomoLite/THIRD_PARTY_NOTICES.md', 'MihomoLite/data/geosite.dat', 'MihomoLite/data/geoip.dat', 'MihomoLite/data/Country.mmdb')
+        $fixedFiles = $requiredFiles + $publicDocs + $optionalPublicDocs + @('MihomoLite/setup.ps1', 'MihomoLite/UPDATE.md', 'MihomoLite/launcher.example.json', 'MihomoLite/LICENSE', 'MihomoLite/THIRD_PARTY_NOTICES.md', 'MihomoLite/data/geosite.dat', 'MihomoLite/data/geoip.dat', 'MihomoLite/data/Country.mmdb')
+        if ($noticePolicy) {
+            $noticeRecords = Get-NoticeRecords $payloadRecords
+            Check-LicenseIndex $archive $noticeRecords
+            $requiredFiles += @('MihomoLite/THIRD_PARTY_NOTICES.md') + @($noticeRecords.Keys)
+            $fixedFiles += @($noticeRecords.Keys)
+            $noticeDirectories = @('MihomoLite/LICENSES')
+            foreach ($noticeName in $noticeRecords.Keys) {
+                $directory = $noticeName.Substring(0, $noticeName.LastIndexOf('/'))
+                while ($directory.StartsWith('MihomoLite/LICENSES/', [StringComparison]::Ordinal)) {
+                    $noticeDirectories += $directory; $directory = $directory.Substring(0, $directory.LastIndexOf('/'))
+                }
+            }
+            $fixedFiles = @($fixedFiles | Where-Object { $_ -cnotin @('MihomoLite/setup.ps1', 'MihomoLite/UPDATE.md') })
+        }
         foreach ($entry in $archive.Entries) {
             $isDirectory = $entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\')
             $name = Get-SafeSegments $entry.FullName 'ZIP entry' -DirectoryEntry:$isDirectory
@@ -227,28 +300,28 @@ function Check-Zip([string]$Path, [string]$ExpectedHash, $ExpectedSize) {
                 Add-Problem "ZIP contains a forbidden browser/database file: '$name'."
             }
             if ($isDirectory) {
-                if ($name -cnotin @('MihomoLite', 'MihomoLite/data', 'MihomoLite/runtime', 'MihomoLite/data/ui', 'MihomoLite/docs') -and -not $name.StartsWith('MihomoLite/data/ui/', [StringComparison]::Ordinal)) {
+                if ($name -cnotin @('MihomoLite', 'MihomoLite/data', 'MihomoLite/runtime', 'MihomoLite/data/ui', 'MihomoLite/docs') -and -not ($noticePolicy -and $noticeDirectories -ccontains $name) -and -not $name.StartsWith('MihomoLite/data/ui/', [StringComparison]::Ordinal)) {
                     Add-Problem "ZIP contains a directory outside the payload whitelist: '$name'."
                 }
             } else {
                 $isUiAsset = $name.StartsWith('MihomoLite/data/ui/', [StringComparison]::Ordinal) -and $leaf -match '\.(?i:html|js|css|json|webmanifest|svg|png|jpg|jpeg|webp|gif|ico|woff|woff2|ttf|otf|txt|md|map|wasm)$'
                 if ($fixedFiles -cnotcontains $name -and -not $isUiAsset) { Add-Problem "ZIP contains a file outside the payload whitelist: '$name'." }
                 if ($requiredFiles -ccontains $name -and $entry.Length -eq 0) { Add-Problem "ZIP required payload file is empty: '$name'." }
-                if ($VerifyPayload) {
+                if ($strongPayload) {
                     [void]$payloadSeen.Add($name)
                     if ($entry.FullName -cne $name) { Add-Problem "ZIP file path must use canonical forward slashes: '$name'." }
                     if (-not $payloadRecords.ContainsKey($name)) { Add-Problem "ZIP file is missing from manifest.files: '$name'." }
                     elseif ($payloadRecords[$name].size -ne $entry.Length) { Add-Problem "ZIP file size does not match manifest.files: '$name'." }
                 }
                 # Each selected stream is opened once. Strong mode reuses the launcher's digest below.
-                if ($VerifyPayload -or $name -ceq 'MihomoLite/MihomoLite.exe') {
+                if ($strongPayload -or $name -ceq 'MihomoLite/MihomoLite.exe') {
                     $stream = $null; $sha = $null
                     try {
                         $stream = $entry.Open()
                         $sha = [Security.Cryptography.SHA256]::Create()
                         $entryHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
                         if ($name -ceq 'MihomoLite/MihomoLite.exe') { $launcherHash = $entryHash }
-                        if ($VerifyPayload -and $payloadRecords.ContainsKey($name) -and $entryHash -cne $payloadRecords[$name].sha256) {
+                        if ($strongPayload -and $payloadRecords.ContainsKey($name) -and $entryHash -cne $payloadRecords[$name].sha256) {
                             Add-Problem "ZIP file SHA-256 does not match manifest.files: '$name'."
                         }
                     } catch { Add-Problem ("Cannot hash ZIP file '{0}': {1}" -f $name, $_.Exception.Message) }
@@ -261,9 +334,9 @@ function Check-Zip([string]$Path, [string]$ExpectedHash, $ExpectedSize) {
             }
         }
         foreach ($required in $requiredFiles) {
-            if (-not $seen.Contains($required) -or ($VerifyPayload -and -not $payloadSeen.Contains($required))) { Add-Problem "ZIP is missing required complete-package payload: '$required'." }
+            if (-not $seen.Contains($required) -or ($strongPayload -and -not $payloadSeen.Contains($required))) { Add-Problem "ZIP is missing required complete-package payload: '$required'." }
         }
-        if ($VerifyPayload) {
+        if ($strongPayload) {
             foreach ($name in $payloadRecords.Keys) {
                 if (-not $payloadSeen.Contains($name)) { Add-Problem "manifest.files entry is missing from ZIP: '$name'." }
             }
@@ -285,9 +358,15 @@ try {
     $script:RootPrefix = $script:Root + [IO.Path]::DirectorySeparatorChar
 } catch { Write-Error $_.Exception.Message; exit 1 }
 
-$rootDirectories = @('cmd', 'assets', 'tests', 'tools', 'docs', 'archive', '.cache', 'data', 'runtime', 'logs', 'release', '.git', '.vscode')
-$rootFiles = @('MihomoLite.exe', '.gitignore', 'go.mod', 'go.sum', 'build.ps1', 'setup.ps1', 'example.yaml', 'README.md', 'UPDATE.md', 'AGENTS.md', 'WORKSPACE.md', 'CURRENT.json', 'launcher.json')
+$rootDirectories = @('cmd', 'assets', 'tests', 'tools', 'docs', 'archive', '.cache', 'data', 'runtime', 'logs', 'release', '.git', '.vscode', '.github', 'LICENSES')
+$rootFiles = @('MihomoLite.exe', '.gitignore', 'go.mod', 'go.sum', 'build.ps1', 'setup.ps1', 'example.yaml', 'README.md', 'UPDATE.md', 'AGENTS.md', 'WORKSPACE.md', 'CURRENT.json', 'launcher.json', 'THIRD_PARTY_NOTICES.md')
 Check-Whitelist $script:Root $rootDirectories $rootFiles 'Workspace root'
+$githubPath = Get-SafeWorkspacePath '.github' '.github'
+if ($null -ne $githubPath -and (Test-Path -LiteralPath $githubPath -PathType Container)) {
+    Check-Whitelist $githubPath @('workflows') @() '.github'
+    $workflowPath = Get-SafeWorkspacePath '.github/workflows' '.github/workflows'
+    if ($null -ne $workflowPath -and (Test-Path -LiteralPath $workflowPath -PathType Container)) { Check-Whitelist $workflowPath @() @('release.yml') '.github/workflows' }
+}
 $cachePath = Get-SafeWorkspacePath '.cache' '.cache'
 if ($null -ne $cachePath -and (Test-Path -LiteralPath $cachePath -PathType Container)) {
     Check-Whitelist $cachePath @('build', 'tests', 'toolchain', 'downloads', 'package') @('README.md') '.cache'
@@ -377,7 +456,42 @@ if ($null -ne $releasePath -and (Test-Path -LiteralPath $releasePath -PathType C
     }
 } elseif (-not $AllowUnpublished -or $hasPublishedRelease) { Add-Problem 'The release directory is required for the current publication.' }
 
+$noticePolicy = (Has-Property $current.release 'releaseNoticePolicy') -or (Has-Property $manifest 'releaseNoticePolicy')
+if ((Has-Property $current.release 'releaseNoticePolicy') -ne (Has-Property $manifest 'releaseNoticePolicy')) {
+    Add-Problem 'CURRENT.json.release and release/current.json must agree on releaseNoticePolicy.'
+}
+if (-not $noticePolicy -and ((Has-Property $manifest 'noticeFiles') -or (Has-Property $manifest 'noticeManifest') -or (Has-Property $current.release 'noticeManifest'))) {
+    Add-Problem 'Notice metadata requires releaseNoticePolicy=1 in both manifests.'
+}
+if ($noticePolicy) {
+    foreach ($descriptor in @($current.release, $manifest)) {
+        $source = $descriptor.noticeManifest
+        if (-not (Is-Object $source) -or $source.path -isnot [string] -or $source.path -cnotmatch '^\.cache/downloads/release-notices-[A-Za-z0-9._-]+/notices\.json$') { Add-Problem 'noticeManifest must describe an explicit verified public notices cache path.' }
+        else { [void](Get-SafeSegments $source.path 'noticeManifest.path') }
+        [void](Test-HashValue $source.sha256 'noticeManifest.sha256')
+        if (-not (Is-Size $source.size) -or $source.size -le 0) { Add-Problem 'noticeManifest.size must be a positive integer.' }
+    }
+    if ($manifest.sourceArchives -isnot [Array]) { Add-Problem 'release/current.json.sourceArchives must be an explicit array.' }
+    $archiveSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $sourceBatch = [string]$manifest.noticeManifest.path
+    if ($sourceBatch.LastIndexOf('/') -ge 0) { $sourceBatch = $sourceBatch.Substring(0, $sourceBatch.LastIndexOf('/') + 1) }
+    foreach ($sourceArchive in @($manifest.sourceArchives)) {
+        if (-not (Is-Object $sourceArchive)) { Add-Problem 'sourceArchives must contain objects.'; continue }
+        $safeArchive = Get-SafeSegments $sourceArchive.path 'sourceArchives.path'
+        if ($null -eq $safeArchive -or $sourceArchive.path -cne $safeArchive -or -not $safeArchive.StartsWith($sourceBatch, [StringComparison]::Ordinal) -or $safeArchive.Substring($sourceBatch.Length) -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:tar\.gz|zip)$') { Add-Problem 'sourceArchives.path must be a same-batch public source archive.' }
+        elseif (-not $archiveSeen.Add($safeArchive)) { Add-Problem 'sourceArchives contains duplicate or case-colliding paths.' }
+        [void](Test-HashValue $sourceArchive.sha256 'sourceArchives.sha256')
+        if (-not (Is-Size $sourceArchive.size) -or $sourceArchive.size -le 0) { Add-Problem 'sourceArchives.size must be a positive integer.' }
+        if ($sourceArchive.repository -cnotin @('MetaCubeX/mihomo','Zephyruso/zashboard','MetaCubeX/meta-rules-dat') -or $sourceArchive.commit -isnot [string] -or $sourceArchive.commit -cnotmatch '^[0-9a-f]{40}$' -or $sourceArchive.url -cne ('https://github.com/' + $sourceArchive.repository + '/archive/' + $sourceArchive.commit + '.tar.gz')) { Add-Problem 'sourceArchives upstream identity is not approved.' }
+    }
+    if ($current.release.noticeManifest.path -cne $manifest.noticeManifest.path -or $current.release.noticeManifest.sha256 -cne $manifest.noticeManifest.sha256 -or $current.release.noticeManifest.size -ne $manifest.noticeManifest.size) { Add-Problem 'CURRENT.json.release and release/current.json must agree on noticeManifest.' }
+}
 foreach ($descriptor in @($current.release, $manifest)) {
+    if (Has-Property $descriptor 'releaseNoticePolicy') {
+        if (($descriptor.releaseNoticePolicy -isnot [int] -and $descriptor.releaseNoticePolicy -isnot [long]) -or $descriptor.releaseNoticePolicy -ne 1) {
+            Add-Problem 'releaseNoticePolicy must be the integer 1 when present.'
+        }
+    }
     if (Has-Property $descriptor 'geoDataPolicy') {
         if (($descriptor.geoDataPolicy -isnot [int] -and $descriptor.geoDataPolicy -isnot [long]) -or $descriptor.geoDataPolicy -ne 1) {
             Add-Problem 'geoDataPolicy must be the integer 1 when present.'

@@ -48,6 +48,10 @@ function Get-SafeFiles {
 }
 function Get-SourceManifest {
     $paths = @('go.mod','go.sum','build.ps1','tools/package.ps1','tools/build-metrics.ps1','tools/build-release.ps1','tools/release-geodata.ps1','tools/prepare-geodata.ps1','tools/check-workspace.ps1','tests/build-pipeline.test.ps1','tests/package-pipeline.test.ps1','tests/release-geodata.test.ps1','tests/maintenance-safety.test.ps1','tests/package-geodata.test.ps1','tests/workspace-constraints.test.ps1','tests/opt005007008-ui.test.cjs','tests/runtime-settings.test.cjs','tests/profile-controls.test.cjs','tests/rule-selection.test.cjs','tests/unified-proxy-ui.test.cjs','tests/draft-protection.test.cjs','tests/frontend-harness.cjs','tests/browser-drafts-smoke.cjs','tests/browser-optimizations-smoke.cjs','tests/browser-connection-share-smoke.cjs','tests/browser-opt005007008-smoke.cjs','tools/update-version-resource.py')
+    # Newly introduced release inputs are optional only for older isolated source fixtures.
+    # A complete current checkout records every present key script/test/workflow without rerunning Go.
+    $releasePaths = @('tools/build-ci-release.ps1','tools/publish-github-release.ps1','tools/release-download.ps1','tools/release-components.ps1','tools/prepare-release-components.ps1','tools/release-notices.ps1','tools/prepare-release-notices.ps1','tests/ci-release-policy.test.ps1','tests/ci-release.test.ps1','tests/github-release.test.ps1','tests/release-components.test.ps1','tests/release-notices.test.ps1','.github/workflows/release.yml','docs/THIRD-PARTY.md')
+    foreach ($relative in $releasePaths) { if (Test-Path -LiteralPath (Get-WorkspacePath $relative) -PathType Leaf) { $paths += $relative } }
     $files = @($paths | ForEach-Object { Get-WorkspacePath $_ }) + @(Get-SafeFiles (Get-WorkspacePath 'cmd/mihomolite'))
     return @($files | Sort-Object -Unique | ForEach-Object { Get-FileRecord -Path $_ -Relative ($_.Substring($script:Workspace.Length + 1)) })
 }

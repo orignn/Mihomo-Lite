@@ -4,6 +4,7 @@ param(
     [string]$WorkspaceRoot = '',
     [switch]$IncludeLauncherExample,
     [string]$GeoDataRoot,
+    [string]$NoticeManifest,
     [switch]$PassThru
 )
 $ErrorActionPreference = 'Stop'
@@ -23,6 +24,16 @@ function Get-PackagePath {
         $cursor = [IO.Path]::GetDirectoryName($cursor)
     }
     return $path
+}
+# The notices generator owns trusted origins; package only its explicitly declared text/JSON records.
+# Never enumerate LICENSES to discover packaging inputs (it may contain unrelated private files).
+function Get-PackageNoticePath {
+    param($Value)
+    if ($Value -isnot [string] -or $Value -cnotmatch '^LICENSES/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\.(?:txt|md|json)$') { throw 'Notice license path must be a canonical LICENSES/ text or JSON path.' }
+    foreach ($part in $Value.Split('/')) {
+        if ($part -in @('.', '..') -or $part -match '[. ]$' -or $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$') { throw 'Unsafe notice license path segment.' }
+    }
+    return Get-PackagePath $Value
 }
 function New-PackageDirectory {
     param([string]$Relative, [switch]$Exclusive)
@@ -86,6 +97,61 @@ function Assert-PackageInputsUnchanged {
         $actual = Get-PackageFileRecord (Get-PackagePath $record.path) $record.path
         if ($actual.sha256 -ne $record.sha256 -or $actual.size -ne $record.size) { throw "Packaging input changed: $($record.path)" }
     }
+}
+function Assert-PackageLicenseIndex {
+    param($Records)
+    $indexPath = Get-PackageNoticePath 'LICENSES/manifest.json'
+    $indexFile = Get-Item -LiteralPath $indexPath
+    if ($indexFile.Length -le 0 -or $indexFile.Length -gt 4194304) { throw 'LICENSES/manifest.json must be non-empty and at most 4 MiB.' }
+    $index = [IO.File]::ReadAllText($indexPath) | ConvertFrom-Json
+    if ($index -isnot [Management.Automation.PSCustomObject] -or ($index.schemaVersion -isnot [int] -and $index.schemaVersion -isnot [long]) -or $index.schemaVersion -ne 1 -or $index.records -isnot [Array] -or $index.records.Count -eq 0) { throw 'LICENSES/manifest.json must have schemaVersion=1 and complete records excluding itself.' }
+    $indexed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $index.records) {
+        $null = Get-PackageNoticePath $entry.path
+        if ($entry.path -ceq 'LICENSES/manifest.json' -or -not $indexed.Add($entry.path)) { throw 'Invalid self-referential or duplicate license index record.' }
+        $matching = @($Records | Where-Object { $_.path -ceq $entry.path })
+        if ($matching.Count -ne 1 -or $entry.sha256 -cne $matching[0].sha256 -or ($entry.size -isnot [int] -and $entry.size -isnot [long]) -or $entry.size -ne $matching[0].size) { throw "License index does not match notice records: $($entry.path)" }
+    }
+    foreach ($entry in $Records) {
+        if ($entry.path -cne 'THIRD_PARTY_NOTICES.md' -and $entry.path -cne 'LICENSES/manifest.json' -and -not $indexed.Contains($entry.path)) { throw "License index is missing a notice record: $($entry.path)" }
+    }
+}
+function Get-PackageNoticeInputs {
+    param([string]$ManifestPath)
+    if ([string]::IsNullOrWhiteSpace($ManifestPath) -or $ManifestPath -cnotmatch '^\.cache/downloads/release-notices-[A-Za-z0-9._-]+/notices\.json$') { throw '-NoticeManifest must be an explicit .cache/downloads/release-notices-<id>/notices.json path.' }
+    $path = Get-PackagePath $ManifestPath
+    $manifestRecord = Get-PackageFileRecord $path $ManifestPath
+    if ($manifestRecord.size -le 0) { throw 'Notice manifest must be non-empty.' }
+    $notice = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    if ($notice -isnot [Management.Automation.PSCustomObject] -or ($notice.schemaVersion -isnot [int] -and $notice.schemaVersion -isnot [long]) -or $notice.schemaVersion -ne 1 -or $notice.status -cne 'verified-ready' -or $notice.redistributionReady -isnot [bool] -or -not $notice.redistributionReady -or $notice.records -isnot [Array] -or $notice.records.Count -lt 2) { throw 'Notice manifest must have verified-ready status and a non-empty complete records array.' }
+    $records = @(); $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in $notice.records) {
+        if ($record -isnot [Management.Automation.PSCustomObject] -or $record.path -isnot [string]) { throw 'Invalid notice file record.' }
+        $inputPath = if ($record.path -ceq 'THIRD_PARTY_NOTICES.md') { Get-PackagePath $record.path } else { Get-PackageNoticePath $record.path }
+        if (-not $seen.Add($record.path)) { throw 'Duplicate or case-colliding notice file record.' }
+        if ($record.sha256 -isnot [string] -or $record.sha256 -cnotmatch '^[0-9a-f]{64}$' -or ($record.size -isnot [int] -and $record.size -isnot [long]) -or $record.size -le 0) { throw 'Notice file SHA-256 and size must be valid and non-empty.' }
+        $actual = Get-PackageFileRecord $inputPath $record.path
+        if ($actual.sha256 -cne $record.sha256 -or $actual.size -ne $record.size) { throw "Notice file SHA-256/size mismatch: $($record.path)" }
+        $records += $actual
+    }
+    if (-not $seen.Contains('LICENSES/manifest.json')) { throw 'Notice manifest is missing LICENSES/manifest.json.' }
+    Assert-PackageLicenseIndex $records
+    if (-not $seen.Contains('THIRD_PARTY_NOTICES.md')) { throw 'Notice manifest is missing THIRD_PARTY_NOTICES.md.' }
+    if (@($records | Where-Object { $_.path -cmatch '^LICENSES/.+\.(txt|md)$' }).Count -eq 0) { throw 'Notice manifest must declare non-empty full license text (.txt or .md).' }
+    if ($notice.sourceArchives -isnot [Array]) { throw 'Notice sourceArchives must be an explicit array.' }
+    $sources = @(); $sourceSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $batch = $ManifestPath.Substring(0, $ManifestPath.LastIndexOf('/') + 1)
+    foreach ($archive in $notice.sourceArchives) {
+        if ($archive -isnot [Management.Automation.PSCustomObject] -or $archive.path -isnot [string] -or -not $archive.path.StartsWith($batch, [StringComparison]::Ordinal)) { throw 'Notice source archive must be in the same verified public download batch.' }
+        if ($archive.repository -cnotin @('MetaCubeX/mihomo','Zephyruso/zashboard','MetaCubeX/meta-rules-dat') -or $archive.commit -isnot [string] -or $archive.commit -cnotmatch '^[0-9a-f]{40}$' -or $archive.url -cne ('https://github.com/' + $archive.repository + '/archive/' + $archive.commit + '.tar.gz')) { throw 'Notice source archive has unapproved upstream identity.' }
+        $name = $archive.path.Substring($batch.Length)
+        if ($name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:tar\.gz|zip)$' -or $name -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])\.' -or -not $sourceSeen.Add($archive.path)) { throw 'Invalid or duplicate notice source archive path.' }
+        if ($archive.sha256 -isnot [string] -or $archive.sha256 -cnotmatch '^[0-9a-f]{64}$' -or ($archive.size -isnot [int] -and $archive.size -isnot [long]) -or $archive.size -le 0) { throw 'Invalid notice source archive SHA-256/size.' }
+        $actual = Get-PackageFileRecord (Get-PackagePath $archive.path) $archive.path
+        if ($actual.sha256 -cne $archive.sha256 -or $actual.size -ne $archive.size) { throw 'Notice source archive SHA-256/size mismatch.' }
+        $sources += $archive
+    }
+    return [pscustomobject]@{records=$records;manifest=$manifestRecord;sourceArchives=$sources}
 }
 function Assert-NoKnownSkippedBuild {
     param([string]$BinaryHash)
@@ -179,13 +245,16 @@ try {
     $oldRelease = @(Get-ReleaseEntries $releaseDirectory)
     $geoSelection = Resolve-ReleaseGeoData -WorkspaceRoot $script:Workspace -GeoDataRoot $GeoDataRoot
     $geoDataInputs = @($geoSelection.records)
+    $noticeSelection = Get-PackageNoticeInputs $NoticeManifest
+    $noticeInputs = @($noticeSelection.records)
     Write-Host ('Reusing verified local Geo data: ' + $geoSelection.root)
     # Public releases exclude local setup and internal history; ship only public documentation.
     $fixedInputs = @('MihomoLite.exe','runtime/mihomo.exe','data/geoip.metadb','example.yaml','README.md','docs/DEVELOPMENT.md','docs/RELEASE.md','docs/CHANGELOG.md')
+    if (Test-Path -LiteralPath (Get-PackagePath 'docs/THIRD-PARTY.md') -PathType Leaf) { $fixedInputs += 'docs/THIRD-PARTY.md' }
     $uiRoot = Get-PackagePath 'data/ui'
     if (-not (Test-Path -LiteralPath (Get-PackagePath 'data/ui/index.html') -PathType Leaf)) { throw 'data/ui/index.html is required.' }
     $uiFiles = @(Get-PackageSafeFiles $uiRoot)
-    $inputRecords = @($fixedInputs | ForEach-Object { Get-PackageFileRecord (Get-PackagePath $_) $_ }) + $geoDataInputs
+    $inputRecords = @($fixedInputs | ForEach-Object { Get-PackageFileRecord (Get-PackagePath $_) $_ }) + $geoDataInputs + $noticeInputs
     $inputRecords += @($uiFiles | ForEach-Object { Get-PackageFileRecord -Path $_ -Relative ($_.Substring($script:Workspace.Length + 1)) })
     $versionRecord = Get-PackageFileRecord $typesPath 'cmd/mihomolite/types.go'
     Stop-BuildStage $activeStage
@@ -232,7 +301,7 @@ try {
     $activeStage = Start-BuildStage $metrics 'verify-package'
     Assert-ZipMatchesPayload $stagedZip $payload $payloadRecords
     $artifact = Get-PackageFileRecord $stagedZip $zipName
-    Assert-PackageInputsUnchanged ($inputRecords + @($versionRecord) + @($geoDataInputs | ForEach-Object { $_.checksum }))
+    Assert-PackageInputsUnchanged ($inputRecords + @($versionRecord, $noticeSelection.manifest) + @($noticeSelection.sourceArchives) + @($geoDataInputs | ForEach-Object { $_.checksum }))
     $newRelease = @(Get-ReleaseEntries $releaseDirectory)
     if ($newRelease.Count -ne $oldRelease.Count) { throw 'Release directory changed during staging.' }
     Assert-PackageInputsUnchanged $oldRelease
@@ -241,6 +310,10 @@ try {
     $releaseManifest = [ordered]@{schemaVersion=1;version=$version;buildId=$buildId;binary=[ordered]@{path='MihomoLite/MihomoLite.exe';sha256=$binary.sha256;size=$binary.size};artifact=$artifact;createdAt=$createdAt;provenance=$provenance.provenance;sourceVerified=$provenance.sourceVerified;tests=$provenance.tests;files=@($payloadRecords | Sort-Object path);buildInfo=$info}
     $current = [ordered]@{schemaVersion=1;version=$version;buildId=$buildId;binary=$binary;provenance=$provenance.provenance;sourceVerified=$provenance.sourceVerified;tests=$provenance.tests;release=[ordered]@{path=('release/' + $zipName);sha256=$artifact.sha256;manifest='release/current.json'};recordedAt=$createdAt}
     $current.release.geoDataPolicy = 1; $releaseManifest.geoDataPolicy = 1
+    $current.release.releaseNoticePolicy = 1; $releaseManifest.releaseNoticePolicy = 1
+    $current.release.noticeManifest = $noticeSelection.manifest; $releaseManifest.noticeManifest = $noticeSelection.manifest
+    $releaseManifest.noticeFiles = @($noticeInputs | Sort-Object path)
+    $releaseManifest.sourceArchives = @($noticeSelection.sourceArchives)
     $releaseManifest.geoDataSource = [ordered]@{root=$geoSelection.root;source=$geoSelection.source;downloaded=$false}
     if ($provenance.buildManifest) { $current.buildManifest = $provenance.buildManifest; $releaseManifest.buildManifest = $provenance.buildManifest }
     Write-PackageJson (Join-Path $stage 'release-current.json') $releaseManifest

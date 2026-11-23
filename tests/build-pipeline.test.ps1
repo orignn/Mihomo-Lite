@@ -231,10 +231,10 @@ function Resolve-ReleaseGeoData {
     $packageStub = @'
 # Test-only package stub. Scope orchestration-fixtures-only.
 [CmdletBinding()]
-param([string]$GeoDataRoot, [switch]$PassThru)
+param([string]$GeoDataRoot, [string]$NoticeManifest, [switch]$PassThru)
 $fixture = Split-Path -Parent $PSScriptRoot
 $settings = Get-FixtureSettings $fixture
-Add-FixtureCall $fixture 'package' @{ geoDataRoot = $GeoDataRoot; passThru = [bool]$PassThru }
+Add-FixtureCall $fixture 'package' @{ geoDataRoot = $GeoDataRoot; noticeManifest = $NoticeManifest; passThru = [bool]$PassThru }
 if ($settings.failure -ceq 'package') { throw 'test-only package failure' }
 $artifact = 'release/test-only-package.txt'
 [IO.File]::WriteAllText((Join-Path $fixture $artifact), 'orchestration-fixtures-only')

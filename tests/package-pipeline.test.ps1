@@ -31,6 +31,19 @@ foreach ($name in @('geosite.dat','geoip.dat')) {
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText(($path + '.sha256sum'), $hash + '  ' + $name)
 }
+# Synthetic permission texts and directory table; never sourced from private runtime files.
+$noticeRelative = '.cache/downloads/release-notices-synthetic/notices.json'
+New-Item -ItemType Directory -Path (Join-Path $fixture 'LICENSES'),(Join-Path $fixture '.cache/downloads/release-notices-synthetic') -Force | Out-Null
+$noticeRecords = @()
+foreach ($relative in @('THIRD_PARTY_NOTICES.md','LICENSES/synthetic-license.txt')) {
+    [IO.File]::WriteAllText((Join-Path $fixture $relative), 'SYNTHETIC PERMISSION TEXT; TEST FIXTURE ONLY; NOT A RELEASE')
+    $file = Get-Item -LiteralPath (Join-Path $fixture $relative)
+    $noticeRecords += [ordered]@{path=$relative;sha256=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant();size=[long]$file.Length}
+}
+[IO.File]::WriteAllText((Join-Path $fixture 'LICENSES/manifest.json'), ([ordered]@{schemaVersion=1;records=@($noticeRecords | Where-Object { $_.path -cne 'THIRD_PARTY_NOTICES.md' });sourceAssets=@()} | ConvertTo-Json -Depth 10))
+$indexFile = Get-Item -LiteralPath (Join-Path $fixture 'LICENSES/manifest.json')
+$noticeRecords += [ordered]@{path='LICENSES/manifest.json';sha256=(Get-FileHash -LiteralPath $indexFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant();size=[long]$indexFile.Length}
+[IO.File]::WriteAllText((Join-Path $fixture $noticeRelative), ([ordered]@{schemaVersion=1;status='verified-ready';redistributionReady=$true;records=$noticeRecords;sourceArchives=@();scope='synthetic-fixture-only'} | ConvertTo-Json -Depth 10))
 # Duplicate only this synthetic source fixture to cover locally retained setup/internal history.
 $localFixture = Join-Path $run 'fixture-with-local-setup'
 Copy-Item -LiteralPath $fixture -Destination $localFixture -Recurse
@@ -54,7 +67,7 @@ function Assert-PublicPayload([string]$FixtureRoot, [string]$Artifact) {
 function Invoke-WebRequest { throw 'Unexpected network operation in offline package integration.' }
 function Invoke-RestMethod { throw 'Unexpected network operation in offline package integration.' }
 try {
-    $result = & (Join-Path $fixture 'tools/build-release.ps1') -PackageOnly -GeoDataRoot $geoRoot
+    $result = & (Join-Path $fixture 'tools/build-release.ps1') -PackageOnly -GeoDataRoot $geoRoot -NoticeManifest $noticeRelative
     Assert-Case (-not (Test-Path -LiteralPath (Join-Path $fixture 'setup.ps1'))) 'Public-source fixture has no setup.ps1'
     Assert-PublicPayload $fixture $result.package.artifact
     Assert-Case ($result.status -eq 'passed' -and $result.mode -eq 'package' -and $null -eq $result.build) 'PackageOnly executes real packaging and consolidated verification without a build'
@@ -71,11 +84,11 @@ try {
     $zip = Join-Path $fixture $result.package.artifact
     $hashBefore = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
     $message = $null
-    try { & (Join-Path $fixture 'tools/package.ps1') -WorkspaceRoot $fixture -GeoDataRoot $geoRoot | Out-Null } catch { $message = $_.Exception.Message }
+    try { & (Join-Path $fixture 'tools/package.ps1') -WorkspaceRoot $fixture -GeoDataRoot $geoRoot -NoticeManifest $noticeRelative | Out-Null } catch { $message = $_.Exception.Message }
     Assert-Case ($message -match 'already exists') 'Existing same-hash package is still refused'
     Assert-Case ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -eq $hashBefore) 'Refused duplicate does not overwrite the ZIP'
     Assert-Case ((Get-FileHash -LiteralPath (Join-Path $root 'MihomoLite.exe') -Algorithm SHA256).Hash -eq $original) 'Real launcher is unchanged'
-    $localResult = & (Join-Path $localFixture 'tools/build-release.ps1') -PackageOnly -GeoDataRoot $geoRoot
+    $localResult = & (Join-Path $localFixture 'tools/build-release.ps1') -PackageOnly -GeoDataRoot $geoRoot -NoticeManifest $noticeRelative
     $localReport = [IO.File]::ReadAllText((Join-Path $localFixture $localResult.report)) | ConvertFrom-Json
     Assert-Case ($localResult.status -eq 'passed' -and $localReport.verification.status -eq 'passed') 'Locally retained setup/internal history do not prevent public packaging or full verification'
     Assert-PublicPayload $localFixture $localResult.package.artifact

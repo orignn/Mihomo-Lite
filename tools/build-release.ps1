@@ -4,7 +4,8 @@ param(
     [switch]$Publish,
     [switch]$PackageOnly,
     [string]$NodePath,
-    [string]$GeoDataRoot
+    [string]$GeoDataRoot,
+    [string]$NoticeManifest
 )
 $ErrorActionPreference = 'Stop'
 $script:PipelineRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd('\')
@@ -107,7 +108,7 @@ try {
     }
     if ($Publish -or $PackageOnly) {
         $active = Start-BuildStage $metrics 'package'
-        $report.package = & (Get-PipelinePath 'tools/package.ps1') -GeoDataRoot $geo.root -PassThru
+        $report.package = & (Get-PipelinePath 'tools/package.ps1') -GeoDataRoot $geo.root -NoticeManifest $NoticeManifest -PassThru
         if (-not $report.package) { throw 'Packaging did not return a result.' }
         Stop-BuildStage $active
         $active = Start-BuildStage $metrics 'verify-publication'
