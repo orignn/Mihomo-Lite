@@ -38,6 +38,13 @@ function Assert-Rejected([scriptblock]$Action, [string]$Pattern, [string]$Label)
 function Write-Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 15), [Text.UTF8Encoding]::new($false))
 }
+# Keep numeric JSON tokens literal: serializers may turn 1.0 into integer 1.
+function Set-FixtureSchema([string]$Path, [string]$JsonValue) {
+    $text = [IO.File]::ReadAllText($Path)
+    $pattern = '"schemaVersion"\s*:\s*1\b'
+    if ([regex]::Matches($text, $pattern).Count -ne 1) { throw 'Expected one synthetic schemaVersion field.' }
+    [IO.File]::WriteAllText($Path, [regex]::Replace($text, $pattern, '"schemaVersion": ' + $JsonValue))
+}
 function New-Root {
     $script:fixture++
     $root = Join-Path $run ('fixture-' + $script:fixture)
@@ -179,6 +186,16 @@ $root = New-Root
 $script:mode = 'disabled'
 Assert-Rejected { Invoke-PrepareReleaseComponents -WorkspaceRoot $root -GeoDataRoot $geoBatch } 'No matching verified' 'default offline refuses absent cache'
 Assert-True ($script:requests.Count -eq 0) 'offline refusal makes zero requests'
+# Windows PowerShell parses JSON 1 as Int32; pwsh parses it as Int64.
+Assert-True ((Test-RCPositiveInteger ([int]1)) -and (Test-RCPositiveInteger ([long]1))) 'both JSON integer representations are supported'
+$invalidSchemas = @('"1"', 'true', 'false', '1.0', '1.5', '0', '-1', '2', 'null', '[]', '{}')
+foreach ($schemaValue in $invalidSchemas) {
+    $schemaRoot = New-Root
+    Set-FixtureSchema (Join-Path $schemaRoot "$geoBatch/provenance.json") $schemaValue
+    $script:requests.Clear()
+    Assert-Rejected { Invoke-PrepareReleaseComponents -WorkspaceRoot $schemaRoot -GeoDataRoot $geoBatch -Refresh } 'GeoDataRoot must be a verified' "Geo schema $schemaValue rejected"
+    Assert-True ($script:requests.Count -eq 0 -and -not [IO.Directory]::Exists((Join-Path $schemaRoot 'runtime')) -and -not [IO.Directory]::Exists((Join-Path $schemaRoot 'data'))) "Geo schema $schemaValue writes no destination or network"
+}
 Assert-Rejected { & $source -WorkspaceRoot 'relative' -GeoDataRoot $geoBatch } 'absolute' 'entry point requires absolute workspace'
 Assert-Rejected { Invoke-PrepareReleaseComponents -WorkspaceRoot $root -GeoDataRoot '../data' } 'verified release batch' 'Geo traversal rejected'
 Assert-Rejected { Invoke-PrepareReleaseComponents -WorkspaceRoot $root -GeoDataRoot $run } 'outside' 'absolute Geo outside workspace rejected'
@@ -231,6 +248,15 @@ foreach ($file in Get-ChildItem -LiteralPath (Join-Path $success $cacheRelative)
 $entryResult = & $source -WorkspaceRoot $entryRoot -GeoDataRoot $geoBatch -PassThru
 Assert-True ($entryResult.components.Count -eq 3) 'actual production entry prepares synthetic offline cache'
 
+foreach ($schemaValue in $invalidSchemas) {
+    $schemaRoot = New-Root
+    $schemaCache = New-RCDirectory $schemaRoot $cacheRelative.Replace('\', '/')
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $success $cacheRelative) -File) { [IO.File]::Copy($file.FullName, (Join-Path $schemaCache $file.Name), $false) }
+    Set-FixtureSchema (Join-Path $schemaRoot $result.manifest) $schemaValue
+    $script:mode = 'disabled'; $script:requests.Clear()
+    Assert-Rejected { Invoke-PrepareReleaseComponents -WorkspaceRoot $schemaRoot -GeoDataRoot $geoBatch } 'Cached components lack verified provenance' "cached schema $schemaValue rejected"
+    Assert-True ($script:requests.Count -eq 0 -and -not [IO.Directory]::Exists((Join-Path $schemaRoot 'runtime')) -and -not [IO.Directory]::Exists((Join-Path $schemaRoot 'data'))) "cached schema $schemaValue writes no destination or network"
+}
 foreach ($tamper in @('digest','repository','releaseId','sourceCommit','archive','verified-type')) {
     $tamperedRoot = New-Root
     $tamperedCache = New-RCDirectory $tamperedRoot $cacheRelative.Replace('\', '/')

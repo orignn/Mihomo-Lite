@@ -275,7 +275,7 @@ function Get-RCCachedComponents {
         if ((Get-Item -LiteralPath $path).Length -gt 8388608) { throw 'Cached component manifest exceeds size limit.' }
         try { $manifest = ConvertFrom-Json ([IO.File]::ReadAllText($path)) -ErrorAction Stop }
         catch { throw 'Invalid cached component manifest.' }
-        if ($manifest.schemaVersion -isnot [int] -or $manifest.schemaVersion -ne 1 -or $manifest.verified -isnot [bool] -or $manifest.verified -cne $true -or $manifest.status -cne 'verified-ready' -or
+        if (-not (Test-RCPositiveInteger $manifest.schemaVersion) -or $manifest.schemaVersion -ne 1 -or $manifest.verified -isnot [bool] -or $manifest.verified -cne $true -or $manifest.status -cne 'verified-ready' -or
             -not (Test-RCPositiveInteger $manifest.geoReleaseId) -or @($manifest.components).Count -ne 3) { throw 'Cached components lack verified provenance.' }
         if ($manifest.geoReleaseId -ne $GeoReleaseId) { continue }
         if ($manifest.components[0].version -cne $Specs[0].version -or $manifest.components[1].version -cne $Specs[1].version) { continue }
@@ -318,7 +318,7 @@ function Invoke-PrepareReleaseComponents {
     $resolved = Resolve-ReleaseGeoData -WorkspaceRoot $root -GeoDataRoot $geo
     $proofPath = Get-RCPath $root "$geo/provenance.json" -File
     $proof = ConvertFrom-Json ([IO.File]::ReadAllText($proofPath))
-    if ($proof.schemaVersion -isnot [int] -or $proof.schemaVersion -ne 1 -or $proof.geoDataRoot -cne $geo -or $proof.repository -cne 'MetaCubeX/meta-rules-dat' -or
+    if (-not (Test-RCPositiveInteger $proof.schemaVersion) -or $proof.schemaVersion -ne 1 -or $proof.geoDataRoot -cne $geo -or $proof.repository -cne 'MetaCubeX/meta-rules-dat' -or
         $proof.releaseMetadataStableAfterDownload -isnot [bool] -or $proof.releaseMetadataStableAfterDownload -cne $true -or $proof.releaseTag -isnot [string] -or $proof.releaseTag -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9._-]*\z') { throw 'GeoDataRoot must be a verified prepare-geodata -Refresh batch with stable release identity.' }
     $specs = @(Get-RCSpec $CoreVersion $PanelVersion $proof)
     $cached = $null

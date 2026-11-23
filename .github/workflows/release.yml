@@ -59,9 +59,11 @@ jobs:
       - name: Verify release helpers using isolated synthetic fixtures
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($test in @('tests/release-components.test.ps1', 'tests/release-notices.test.ps1', 'tests/ci-release.test.ps1', 'tests/github-release.test.ps1')) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PWD $test)
-            if ($LASTEXITCODE -ne 0) { throw "Release helper tests failed: $test" }
+          foreach ($engine in @('powershell.exe', 'pwsh.exe')) {
+            foreach ($test in @('tests/release-components.test.ps1', 'tests/release-notices.test.ps1', 'tests/ci-release.test.ps1', 'tests/github-release.test.ps1')) {
+              & $engine -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PWD $test)
+              if ($LASTEXITCODE -ne 0) { throw "Release helper tests failed ($engine): $test" }
+            }
           }
       - name: Prepare verified public components, test, build and package
         id: build
