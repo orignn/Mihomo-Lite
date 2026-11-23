@@ -215,7 +215,13 @@ function Get-RCZipPayload {
         }
         $prefix = ''
         if ($Spec.name -ceq 'core') {
-            if ($files.Count -ne 1 -or $directories.Count -ne 0 -or ($files[0].name -cne 'mihomo.exe' -and $files[0].name -cne ($Spec.assetName.Substring(0, $Spec.assetName.Length - 4) + '.exe'))) { throw 'Core ZIP must contain only its official single executable.' }
+            # Official assets drop the release-version suffix from the inner executable:
+            # mihomo-windows-amd64-compatible-<version>.zip -> mihomo-windows-amd64-compatible.exe
+            $coreBase = [IO.Path]::GetFileNameWithoutExtension($Spec.assetName)
+            $versionSuffix = '-' + [string]$Spec.version
+            if ($coreBase.EndsWith($versionSuffix, [StringComparison]::Ordinal)) { $coreBase = $coreBase.Substring(0, $coreBase.Length - $versionSuffix.Length) }
+            $expectedCore = $coreBase + '.exe'
+            if ($files.Count -ne 1 -or $directories.Count -ne 0 -or $files[0].name -cne $expectedCore) { throw 'Core ZIP must contain only its official single executable.' }
         } else {
             $indices = @($files | Where-Object { $_.name -ceq 'index.html' -or $_.name -ceq 'dist/index.html' -or $_.name -ceq 'dist-no-fonts/index.html' })
             if ($indices.Count -ne 1 -or @($files | Where-Object { [IO.Path]::GetFileName($_.name) -ieq 'index.html' }).Count -ne 1) { throw 'Panel ZIP must have one supported official static root index.html.' }

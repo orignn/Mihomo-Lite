@@ -88,7 +88,7 @@ function New-Zip($Entries) {
 }
 function Set-Assets([string]$PanelRoot = 'dist/') {
     $script:assets = @{
-        'MetaCubeX/mihomo' = [pscustomobject]@{ id = 100; tag = 'v1.19.34'; name = 'mihomo-windows-amd64-compatible-v1.19.34.zip'; bytes = (New-Zip @([pscustomobject]@{ name = 'mihomo-windows-amd64-compatible-v1.19.34.exe'; bytes = (New-PE) })) }
+        'MetaCubeX/mihomo' = [pscustomobject]@{ id = 100; tag = 'v1.19.34'; name = 'mihomo-windows-amd64-compatible-v1.19.34.zip'; bytes = (New-Zip @([pscustomobject]@{ name = 'mihomo-windows-amd64-compatible.exe'; bytes = (New-PE) })) }
         'Zephyruso/zashboard' = [pscustomobject]@{ id = 200; tag = 'v3.30.0'; name = 'dist-no-fonts.zip'; bytes = (New-Zip @(
             [pscustomobject]@{ name = $PanelRoot + 'index.html'; bytes = [Text.Encoding]::UTF8.GetBytes('<html>synthetic static panel</html>') },
             [pscustomobject]@{ name = $PanelRoot + 'assets/app.js'; bytes = [Text.Encoding]::UTF8.GetBytes('window.syntheticFixture = true;') })) }
@@ -270,11 +270,12 @@ Assert-True ($annotated.components[0].sourceCommitSHA -ceq ('a' * 40)) 'annotate
 $script:mode = 'normal'
 
 # Full pipeline archive rejection must precede *all* destination writes.
-foreach ($badArchive in @('core-extra-exe','core-invalid-PE','panel-installer')) {
+foreach ($badArchive in @('core-extra-exe','core-invalid-PE','core-versioned-inner-name','panel-installer')) {
     Set-Assets
     switch ($badArchive) {
         'core-extra-exe' { $script:assets['MetaCubeX/mihomo'].bytes = New-Zip @([pscustomobject]@{ name = 'evil.exe'; bytes = (New-PE) }) }
-        'core-invalid-PE' { $script:assets['MetaCubeX/mihomo'].bytes = New-Zip @([pscustomobject]@{ name = 'mihomo.exe'; bytes = [Text.Encoding]::UTF8.GetBytes('not a PE') }) }
+        'core-invalid-PE' { $script:assets['MetaCubeX/mihomo'].bytes = New-Zip @([pscustomobject]@{ name = 'mihomo-windows-amd64-compatible.exe'; bytes = [Text.Encoding]::UTF8.GetBytes('not a PE') }) }
+        'core-versioned-inner-name' { $script:assets['MetaCubeX/mihomo'].bytes = New-Zip @([pscustomobject]@{ name = 'mihomo-windows-amd64-compatible-v1.19.34.exe'; bytes = (New-PE) }) }
         'panel-installer' { $script:assets['Zephyruso/zashboard'].bytes = New-Zip @([pscustomobject]@{ name = 'dist/index.html'; bytes = @(1) }, [pscustomobject]@{ name = 'dist/postinstall.js'; bytes = @(1) }) }
     }
     $badArchiveRoot = New-Root
