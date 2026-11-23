@@ -153,12 +153,25 @@ Case 'Reject local/private module replacement before network or output' {
     ExpectReject {& $testScript -WorkspaceRoot $root -ComponentManifest $cm -Refresh} 'replace/exclude'
     Assert ($before -eq $global:NoticeTest_mockCalls.Count -and -not [IO.Directory]::Exists((Join-Path $root 'LICENSES'))) 'Bad module input contacted network or wrote output'
 }
-Case 'Reject unsafe relative cache/manifest and daily workspace' {
+Case 'Reject unsafe relative cache/manifest paths' {
     $root=NewFixture 'paths'
     ExpectReject {& $scriptPath -WorkspaceRoot '.' -ComponentManifest $cm} 'absolute local'
-    ExpectReject {& $scriptPath -WorkspaceRoot $project -ComponentManifest $cm} 'isolated source-clone'
     ExpectReject {& $scriptPath -WorkspaceRoot $root -ComponentManifest '.cache/downloads/release-components-fixture/../components.json'} 'ComponentManifest'
     ExpectReject {& $scriptPath -WorkspaceRoot $root -ComponentManifest $cm -GoModCache 'C:/private/gomod'} 'GOMODCACHE'
+}
+# CI runners have no daily runtime markers. Never rely on $project
+# being a daily workspace: create each marker only inside a synthetic fixture.
+foreach ($marker in @('CURRENT.json','MihomoLite.exe','launcher.json','logs')) {
+    Case ('Reject synthetic daily workspace marker: ' + $marker) {
+        $root=NewFixture ('daily-' + $marker.Replace('.', '-'))
+        if ($marker -eq 'logs') { [void][IO.Directory]::CreateDirectory((Join-Path $root $marker)) }
+        else { Put $root $marker 'SYNTHETIC DAILY WORKSPACE MARKER: NOT REAL RUNTIME DATA' }
+        $before=$global:NoticeTest_mockCalls.Count
+        $global:NoticeTest_offline=$true
+        try { ExpectReject {& $scriptPath -WorkspaceRoot $root -ComponentManifest $cm -Refresh} 'isolated source-clone' }
+        finally { $global:NoticeTest_offline=$false }
+        Assert ($before -eq $global:NoticeTest_mockCalls.Count -and -not [IO.Directory]::Exists((Join-Path $root 'LICENSES'))) 'Daily workspace contacted network or wrote output'
+    }
 }
 Case 'Reject mismatching cache module lock before network' {
     $root=NewFixture 'ziphash'; Put $root '.cache/toolchain/gomod/cache/download/github.com/dlclark/regexp2/@v/v1.12.0.ziphash' ('h1:'+('B'*43)+'=')
