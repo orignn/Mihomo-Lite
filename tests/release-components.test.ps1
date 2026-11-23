@@ -91,7 +91,8 @@ function Set-Assets([string]$PanelRoot = 'dist/') {
         'MetaCubeX/mihomo' = [pscustomobject]@{ id = 100; tag = 'v1.19.34'; name = 'mihomo-windows-amd64-compatible-v1.19.34.zip'; bytes = (New-Zip @([pscustomobject]@{ name = 'mihomo-windows-amd64-compatible.exe'; bytes = (New-PE) })) }
         'Zephyruso/zashboard' = [pscustomobject]@{ id = 200; tag = 'v3.30.0'; name = 'dist-no-fonts.zip'; bytes = (New-Zip @(
             [pscustomobject]@{ name = $PanelRoot + 'index.html'; bytes = [Text.Encoding]::UTF8.GetBytes('<html>synthetic static panel</html>') },
-            [pscustomobject]@{ name = $PanelRoot + 'assets/app.js'; bytes = [Text.Encoding]::UTF8.GetBytes('window.syntheticFixture = true;') })) }
+            [pscustomobject]@{ name = $PanelRoot + 'assets/app.js'; bytes = [Text.Encoding]::UTF8.GetBytes('window.syntheticFixture = true;') },
+            [pscustomobject]@{ name = $PanelRoot + 'THIRD_PARTY_NOTICES.md'; bytes = [Text.Encoding]::UTF8.GetBytes('synthetic official panel notices text') })) }
         'MetaCubeX/meta-rules-dat' = [pscustomobject]@{ id = 300; tag = '20261123'; name = 'geoip.metadb'; bytes = [Text.Encoding]::UTF8.GetBytes('synthetic metadb ONLY from fixed releaseId 300') }
     }
 }
@@ -194,7 +195,7 @@ $result = Invoke-PrepareReleaseComponents -WorkspaceRoot $success -GeoDataRoot (
 $manifest = ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $success $result.manifest)))
 Assert-True ($result.components.Count -eq 3 -and $manifest.verified -eq $true) 'three verified components returned'
 Assert-True (($manifest.components.name -join ',') -ceq 'core,panel,metadb') 'manifest component names stable'
-Assert-True ($manifest.files.Count -eq 4 -and $manifest.directorySHA256 -ceq (Get-RCDirectorySHA $manifest.files)) 'manifest global directory SHA exact'
+Assert-True ($manifest.files.Count -eq 5 -and $manifest.directorySHA256 -ceq (Get-RCDirectorySHA $manifest.files)) 'manifest global directory SHA exact'
 foreach ($component in $result.components) {
     Assert-True ($component.sourceCommitSHA -ceq ('a' * 40) -and $component.asset.digest -match '^sha256:[0-9a-f]{64}$') "$($component.name) commit and official asset digest"
     foreach ($file in $component.files) { Assert-True ((Get-RCRecord $success $file.path).sha256 -ceq $file.sha256) "$($file.path) destination digest verified" }

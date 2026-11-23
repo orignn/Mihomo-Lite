@@ -240,7 +240,7 @@ function Get-RCZipPayload {
                 $relative = $file.name.Substring($prefix.Length)
                 if ($relative -match '(?i)(^|/)(node_modules|node|scripts|\.git)(/|$)' -or
                     $relative -match '(?i)(^|/)(package(?:-lock)?\.json|(?:pre|post)?install\.[^/]+|setup\.[^/]+|vite\.config\.[^/]+|.*\.(?:exe|dll|ps1|bat|cmd|msi|sh|cjs|mjs))$' -or
-                    [IO.Path]::GetExtension($relative).ToLowerInvariant() -notin @('.html', '.js', '.css', '.json', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.otf', '.txt', '.webmanifest', '.map', '.avif', '.wasm')) { throw 'Panel ZIP contains non-static or forbidden executable/tool content.' }
+                    [IO.Path]::GetExtension($relative).ToLowerInvariant() -notin @('.html', '.js', '.css', '.json', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.otf', '.txt', '.md', '.webmanifest', '.map', '.avif', '.wasm')) { throw 'Panel ZIP contains non-static or forbidden executable/tool content.' }
                 # JavaScript is static browser content only; it is never evaluated by this tool.
                 $destination += '/' + $relative
             }
