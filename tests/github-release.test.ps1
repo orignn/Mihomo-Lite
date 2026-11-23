@@ -177,6 +177,11 @@ try {
     Assert-Reject 'Report fixed to an unexpected commit is refused' 'does not match the trusted repository/revision/tag' @{ WrongReportCommit = $true }
     # Run the real API allowlist, upload orchestration and receipt checks with a
     # process-local fake HTTP transport. No request leaves these isolated drivers.
+    # Exercise the actual Actions invocation, including its success check and exit code.
+    $workflow=[IO.File]::ReadAllText((Join-Path $repoRoot '.github/workflows/release.yml'))
+    $invocation=[regex]::Match($workflow, '(?ms)^          \$result = & .*?publish-github-release\.ps1 @arguments -PassThru\r?\n.*?^          \$global:LASTEXITCODE = 0\s*$')
+    if(-not $invocation.Success){throw 'Missing workflow publisher receipt validation'}
+    $workflowInvocation=($invocation.Value -replace '(?m)^          ', '').Replace('.\tools\publish-github-release.ps1', '$Publisher')
     $driver=@'
 param([string]$Publisher,[string]$Dir,[string]$Mode,[string]$Transcript)
 $ErrorActionPreference='Stop'
@@ -222,13 +227,16 @@ function Invoke-RestMethod {
 try{
     $arguments=@{ArtifactDirectory=$Dir;ExpectedCommit=('a'*40);ExpectedTag='v0.6.18';Publish=$true}
     if($Mode -eq 'draft'){$arguments.Draft=$true}
-    & $Publisher @arguments | Out-Null
+    $global:LASTEXITCODE=7
+    # WORKFLOW_PUBLISH_INVOCATION
+    if($LASTEXITCODE -ne 0){throw 'Workflow retained a stale native exit code'}
     $status='passed';$errorText=''
 }catch{$status='rejected';$errorText=$_.Exception.Message}
 $result=[ordered]@{status=$status;message=$errorText;calls=$global:GRTestCalls.ToArray();uploaded=$global:GRTestUploaded.Count;finalized=$global:GRTestFinalized}
 [IO.File]::WriteAllText($Transcript,($result | ConvertTo-Json -Depth 12))
 '@
     $driverFile=Join-Path $run 'mock-http-driver.ps1'
+    $driver=$driver.Replace('# WORKFLOW_PUBLISH_INVOCATION', $workflowInvocation)
     [IO.File]::WriteAllText($driverFile,$driver)
     foreach($mode in @('draft','official','wrong-tag','existing-release','unknown-create','bad-upload')){
         $receiptFile=Join-Path $run ($mode+'-receipt.json')

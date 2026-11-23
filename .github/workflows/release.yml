@@ -124,5 +124,7 @@ jobs:
             Publish = $true
             Draft = ($env:LEAVE_DRAFT -eq 'true')
           }
-          & .\tools\publish-github-release.ps1 @arguments
-          if ($LASTEXITCODE -ne 0) { throw 'Release publication did not complete; inspect any retained draft before retrying.' }
+          $result = & .\tools\publish-github-release.ps1 @arguments -PassThru
+          if ($null -eq $result -or $result.status -cne 'published') { throw 'Release publication did not complete; inspect any retained draft before retrying.' }
+          # REST-based PowerShell scripts do not set the native process exit code.
+          $global:LASTEXITCODE = 0
